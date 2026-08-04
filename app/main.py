@@ -21,6 +21,8 @@ from .notes import SecretLikeValue, notes
 from .rate_limit import _ChatCapacityExhausted, enforce_rate_limit, limiter
 from .settings import settings
 from .tools import ToolConfigurationError, ToolRequestError, github, web_search
+from .vault import KNOWN_KEYS as VAULT_KNOWN_KEYS, VaultError, VaultNotConfigured, _fingerprint, ping_all, vault
+from .gallery import gallery
 
 _GITHUB_URL = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.I)
 
@@ -111,7 +113,15 @@ class BodyLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings.validate_startup(); audit.record("aion.startup", {"version": settings.app_version, "environment": settings.environment}); yield; audit.record("aion.shutdown", {})
+    settings.validate_startup()
+    audit.record("aion.startup", {"version": settings.app_version, "environment": settings.environment})
+    try:
+        seeded = vault.reconcile_with_env()
+        if seeded: audit.record("vault.reconciled", {"seeded": seeded, "total": len(VAULT_KNOWN_KEYS)})
+    except VaultNotConfigured as exc:
+        audit.record("vault.disabled", {"reason": str(exc)})
+    yield
+    audit.record("aion.shutdown", {})
 
 app = FastAPI(title=f"{settings.app_name} Runtime", version=settings.app_version, description="Authenticated AION runtime with web and GitHub tools", docs_url=None if settings.environment == "production" else "/docs", redoc_url=None, lifespan=lifespan)
 app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
@@ -252,15 +262,31 @@ async def image_generate(body: ImageGenBody, principal: Principal = Depends(auth
         response = await client.images.generate(**kwargs)
         import base64
         items: list[dict[str, Any]] = []
-        for item in (response.data or []):
+        gallery_ids: list[str] = []
+        for idx, item in enumerate(response.data or []):
             record: dict[str, Any] = {"revised_prompt": getattr(item, "revised_prompt", None)}
             b64 = getattr(item, "b64_json", None)
             url = getattr(item, "url", None)
             if b64: record["b64_json"] = b64
             if url: record["url"] = url
             items.append(record)
-        audit.record("image.generate.succeeded", {"subject": principal.subject, "model": body.model, "count": len(items)})
-        return {"ok": True, "model": body.model, "items": items, "count": len(items)}
+            # Persist to gallery
+            try:
+                w, h = _parse_size(body.size) if "x" in body.size else (None, None)
+                gal = gallery.add(
+                    owner=principal.subject, kind="image", source="openai",
+                    mime="image/png" if body.model != "dall-e-3" else "image/png",
+                    filename=f"image_{int(time.time())}_{idx}.png",
+                    prompt=body.prompt, model=body.model, size=body.size,
+                    width=w, height=h,
+                    b64=b64, external_url=url,
+                    metadata={"revised_prompt": getattr(item, "revised_prompt", None)},
+                )
+                record["gallery_id"] = gal.id
+                gallery_ids.append(gal.id)
+            except Exception as exc: audit.record("gallery.persist_failed", {"subject": principal.subject, "model": body.model, "error": str(exc)[:200]})
+        audit.record("image.generate.succeeded", {"subject": principal.subject, "model": body.model, "count": len(items), "gallery_ids": gallery_ids})
+        return {"ok": True, "model": body.model, "items": items, "count": len(items), "gallery_ids": gallery_ids}
     except Exception as exc:
         # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
         return {"ok": False, "error": f"image_generate_failed: {exc}", "kind": "image_error", "model": body.model, "items": [], "count": 0}
@@ -317,8 +343,25 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
         video_id = job.get("id")
         status = job.get("status", "queued")
         if not body.poll or status in ("completed", "failed"):
-            audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "status": status, "polled": False})
-            return {"ok": True, "model": body.model, "video_id": video_id, "status": status, "size": body.size, "seconds": body.seconds, "progress": job.get("progress"), "raw": job}
+            # Persist metadata to gallery so the operator can find the job
+            gallery_id: str | None = None
+            if status == "completed":
+                try:
+                    w, h = (body.size.split("x") + [None, None])[:2]
+                    gal = gallery.add(
+                        owner=principal.subject, kind="video", source="sora",
+                        mime="video/mp4",
+                        filename=f"video_{video_id}.mp4",
+                        prompt=body.prompt, model=body.model, size=body.size,
+                        width=int(w) if w else None, height=int(h) if h else None,
+                        seconds=body.seconds,
+                        external_id=video_id,
+                        metadata={"progress": job.get("progress"), "raw": {k: v for k, v in (job or {}).items() if k != "content"}},
+                    )
+                    gallery_id = gal.id
+                except Exception as exc: audit.record("gallery.persist_failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "error": str(exc)[:200]})
+            audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "status": status, "polled": False, "gallery_id": gallery_id})
+            return {"ok": True, "model": body.model, "video_id": video_id, "status": status, "size": body.size, "seconds": body.seconds, "progress": job.get("progress"), "raw": job, "gallery_id": gallery_id}
         # Poll until done
         import asyncio
         deadline = asyncio.get_event_loop().time() + body.poll_timeout_seconds
@@ -351,8 +394,24 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
             raise HTTPException(status_code=content_resp.status_code, detail=f"video_download_failed: {_extract_error(content_resp)}")
         import base64
         mp4_bytes = content_resp.content
-        audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "size_bytes": len(mp4_bytes), "polled": True})
-        return {"ok": True, "model": body.model, "video_id": video_id, "status": "completed", "size": body.size, "seconds": body.seconds, "mp4_b64": base64.b64encode(mp4_bytes).decode("ascii"), "size_bytes": len(mp4_bytes), "raw": {k: v for k, v in last_job.items() if k != "content"}}
+        # Persist to gallery
+        gallery_id: str | None = None
+        try:
+            w, h = (body.size.split("x") + [None, None])[:2]
+            gal = gallery.add(
+                owner=principal.subject, kind="video", source="sora",
+                mime="video/mp4",
+                filename=f"video_{video_id}.mp4",
+                prompt=body.prompt, model=body.model, size=body.size,
+                width=int(w) if w else None, height=int(h) if h else None,
+                seconds=body.seconds,
+                data=mp4_bytes, external_id=video_id,
+                metadata={"last_job": {k: v for k, v in (last_job or {}).items() if k != "content"}},
+            )
+            gallery_id = gal.id
+        except Exception as exc: audit.record("gallery.persist_failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "error": str(exc)[:200]})
+        audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "size_bytes": len(mp4_bytes), "polled": True, "gallery_id": gallery_id})
+        return {"ok": True, "model": body.model, "video_id": video_id, "status": "completed", "size": body.size, "seconds": body.seconds, "mp4_b64": base64.b64encode(mp4_bytes).decode("ascii"), "size_bytes": len(mp4_bytes), "raw": {k: v for k, v in last_job.items() if k != "content"}, "gallery_id": gallery_id}
 
 
 @app.get("/api/video/{video_id}")
@@ -456,6 +515,112 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                 yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
         yield b"data: [DONE]\n\n"
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value})
+
+# ===========================================================================
+# Vault — admin-scoped secret management
+# ===========================================================================
+
+class VaultRotateBody(BaseModel):
+    value: str = Field(min_length=1, max_length=8000)
+    metadata: dict[str, Any] | None = None
+
+@app.get("/api/vault/status")
+async def vault_status(_: Principal = Depends(require_admin)):
+    """Aggregate status: total/configured counts, key derivation flag, etc."""
+    return {"ok": True, **vault.status()}
+
+@app.get("/api/vault")
+async def vault_list(category: str | None = Query(default=None, max_length=40), _: Principal = Depends(require_admin)):
+    """List all known keys. NEVER returns plaintext values."""
+    entries = vault.list_entries(category=category)
+    return {"ok": True, "items": [e.public_dict() for e in entries], "count": len(entries), "known_keys": len(VAULT_KNOWN_KEYS)}
+
+@app.get("/api/vault/known")
+async def vault_known(_: Principal = Depends(require_admin)):
+    """Return the catalogue of known key names (independent of whether they are configured)."""
+    return {"ok": True, "keys": VAULT_KNOWN_KEYS, "count": len(VAULT_KNOWN_KEYS)}
+
+@app.post("/api/vault/{name}/reveal")
+async def vault_reveal(name: str, principal: Principal = Depends(confirmed_admin)):
+    """Decrypt and return the plaintext value of a single key. Logged."""
+    try:
+        plaintext = vault.reveal(name)
+    except VaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if plaintext is None:
+        raise HTTPException(status_code=404, detail="key_not_found_or_empty")
+    audit.record("vault.revealed", {"subject": principal.subject, "name": name})
+    return {"ok": True, "name": name, "value": plaintext, "fingerprint": _fingerprint(plaintext)}
+
+@app.post("/api/vault/{name}/rotate")
+async def vault_rotate(name: str, body: VaultRotateBody, principal: Principal = Depends(confirmed_admin)):
+    """Set a new value for a known key. Writes to encrypted DB and to live env (hot-reload)."""
+    try:
+        entry = vault.set_value(name=name, value=body.value, actor=principal.subject, source="rotate", metadata=body.metadata)
+    except VaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit.record("vault.rotated", {"subject": principal.subject, "name": name, "fingerprint": entry.fingerprint})
+    return {"ok": True, "entry": entry.public_dict()}
+
+@app.post("/api/vault/{name}/ping")
+async def vault_ping_one(name: str, principal: Principal = Depends(require_admin)):
+    """Ping a single provider. Records the result on the entry."""
+    try:
+        plaintext = vault.reveal(name)
+    except VaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if plaintext is None: raise HTTPException(status_code=404, detail="key_not_found_or_empty")
+    from .vault import ping as _ping
+    ok, latency_ms, error = await _ping(name, plaintext)
+    vault.record_ping(name, ok=ok, latency_ms=latency_ms, error=error)
+    audit.record("vault.pinged", {"subject": principal.subject, "name": name, "ok": ok, "latency_ms": latency_ms})
+    return {"ok": ok, "name": name, "latency_ms": latency_ms, "error": error}
+
+@app.post("/api/vault/ping")
+async def vault_ping_all(_: Principal = Depends(require_admin)):
+    """Ping every configured key in parallel. Returns per-key result + overall summary."""
+    results = await ping_all()
+    ok_count = sum(1 for r in results if r.get("ok"))
+    err_count = len(results) - ok_count
+    audit.record("vault.ping_all", {"ok": ok_count, "error": err_count, "total": len(results)})
+    return {"ok": True, "results": results, "summary": {"total": len(results), "ok": ok_count, "error": err_count}}
+
+@app.post("/api/vault/reconcile")
+async def vault_reconcile(principal: Principal = Depends(require_admin)):
+    """Re-import any newly-set env vars into the vault (does not overwrite manual values)."""
+    seeded = vault.reconcile_with_env(actor=f"admin:{principal.subject}")
+    audit.record("vault.reconciled", {"subject": principal.subject, "seeded": seeded})
+    return {"ok": True, "seeded": seeded, "known_keys": len(VAULT_KNOWN_KEYS)}
+
+
+# ===========================================================================
+# Gallery — persistent image + video store
+# ===========================================================================
+
+@app.get("/api/gallery/status")
+async def gallery_status(_: Principal = Depends(authenticated)):
+    return gallery.status()
+
+@app.get("/api/gallery")
+async def gallery_list(kind: Literal["image", "video"] | None = None, limit: int = Query(default=60, ge=1, le=200), offset: int = Query(default=0, ge=0), principal: Principal = Depends(authenticated)):
+    items = gallery.list(principal.subject, kind=kind, limit=limit, offset=offset)
+    return {"ok": True, "items": [i.public_dict() for i in items], "count": len(items)}
+
+@app.delete("/api/gallery/{item_id}")
+async def gallery_delete(item_id: str, principal: Principal = Depends(authenticated)):
+    if not gallery.delete(principal.subject, item_id): raise HTTPException(status_code=404, detail="item_not_found")
+    audit.record("gallery.deleted", {"subject": principal.subject, "item_id": item_id})
+    return {"ok": True, "id": item_id}
+
+@app.get("/api/gallery/{item_id}/raw")
+async def gallery_raw(item_id: str, principal: Principal = Depends(authenticated)):
+    """Stream the raw bytes (image/png or video/mp4) for a gallery item. Owner-scoped."""
+    item = gallery.get(item_id)
+    if item is None or item.owner != principal.subject: raise HTTPException(status_code=404, detail="item_not_found")
+    data = gallery.get_data(item_id)
+    if data is None: raise HTTPException(status_code=404, detail="data_not_found")
+    from fastapi.responses import Response
+    return Response(content=data, media_type=item.mime, headers={"Cache-Control": "private, max-age=300", "X-AION-Filename": item.filename, "Content-Disposition": f'inline; filename="{item.filename}"'})
 
 def _sse(payload): return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
 def _search_query(enabled, text):
