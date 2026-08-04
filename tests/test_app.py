@@ -238,3 +238,184 @@ def test_chat_capacity_handler_is_registered():
     assert body["error"] == "chat_capacity_exhausted"
     assert body["retry_after_seconds"] == 1
 
+
+
+# ===========================================================================
+# Vault tests
+# ===========================================================================
+
+import base64
+import os
+import tempfile
+from cryptography.fernet import Fernet
+
+
+@pytest.fixture
+def _vault_db(monkeypatch, tmp_path):
+    """Use a temp dir so the test doesn't pollute the real vault DB."""
+    monkeypatch.setenv("AION_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AION_VAULT_MASTER_KEY", Fernet.generate_key().decode())
+    # Reload the vault module so it picks up the new env.
+    import importlib
+    from app import vault as vault_mod
+    importlib.reload(vault_mod)
+    from app import main as main_mod
+    importlib.reload(main_mod)
+    return main_mod
+
+
+def test_vault_status_admin(_vault_db):
+    client = TestClient(_vault_db.app)
+    r = client.get("/api/vault/status", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["known_keys"] >= 20
+    assert "key_is_derived" in body
+
+
+def test_vault_list_requires_admin():
+    with TestClient(app) as c:
+        assert c.get("/api/vault").status_code == 401
+        assert c.get("/api/vault", headers=USER_HEADERS).status_code == 403
+        r = c.get("/api/vault", headers=ADMIN_HEADERS)
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert any(i["name"] == "OPENAI_API_KEY" for i in items)
+        # No plaintext in the list response
+        for item in items:
+            assert "value" not in item
+            assert "value_ciphertext" not in item
+
+
+def test_vault_rotate_and_reveal(_vault_db):
+    client = TestClient(_vault_db.app)
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    r = client.post("/api/vault/OPENAI_API_KEY/rotate", headers=headers, json={"value": "sk-test-rotate-value-12345678"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert len(body["entry"]["fingerprint"]) == 12
+    assert body["entry"]["has_value"] is True
+    # Reveal (needs confirmation)
+    r = client.post("/api/vault/OPENAI_API_KEY/reveal", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["value"] == "sk-test-rotate-value-12345678"
+    # Confirm header required
+    r = client.post("/api/vault/OPENAI_API_KEY/reveal", headers=ADMIN_HEADERS)
+    assert r.status_code == 409
+
+
+def test_vault_rotate_requires_admin(_vault_db):
+    client = TestClient(_vault_db.app)
+    r = client.post("/api/vault/OPENAI_API_KEY/rotate", headers=USER_HEADERS, json={"value": "sk-x"})
+    assert r.status_code == 403
+
+
+def test_vault_ping_all_uses_real_http(_vault_db):
+    """The vault should not crash if the live providers are unreachable.
+    We ping a few and assert we get structured results back."""
+    client = TestClient(_vault_db.app)
+    # Seed two keys first
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    client.post("/api/vault/OPENAI_API_KEY/rotate", headers=headers, json={"value": "sk-invalid-key-12345"})
+    client.post("/api/vault/GITHUB_TOKEN/rotate", headers=headers, json={"value": "ghp_invalid-12345"})
+    r = client.post("/api/vault/ping", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "results" in body
+    assert "summary" in body
+    assert body["summary"]["total"] >= 2
+    for result in body["results"]:
+        assert "name" in result
+        assert "ok" in result
+
+
+def test_vault_known(_vault_db):
+    client = TestClient(_vault_db.app)
+    r = client.get("/api/vault/known", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    keys = r.json()["keys"]
+    names = {k["name"] for k in keys}
+    assert "OPENAI_API_KEY" in names
+    assert "GITHUB_TOKEN" in names
+    assert "RESEND_API_KEY" in names
+    assert "PINECONE_API_KEY" in names
+
+
+def test_vault_reconcile_imports_env(_vault_db, monkeypatch):
+    """If an env var is set and the vault entry is empty, /api/vault/reconcile
+    should import it."""
+    client = TestClient(_vault_db.app)
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_abc")
+    r = client.post("/api/vault/reconcile", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    # The entry should now have a value
+    r = client.get("/api/vault", headers=ADMIN_HEADERS)
+    items = r.json()["items"]
+    resend = next((i for i in items if i["name"] == "RESEND_API_KEY"), None)
+    assert resend is not None
+    assert resend["has_value"] is True
+
+
+# ===========================================================================
+# Gallery tests
+# ===========================================================================
+
+
+def test_gallery_status():
+    with TestClient(app) as c:
+        r = c.get("/api/gallery/status", headers=USER_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert "images_count" in body
+        assert "videos_count" in body
+
+
+def _test_user_subject() -> str:
+    import hashlib
+    return "key_" + hashlib.sha256(b"test-user-key").hexdigest()[:16]
+
+def test_gallery_add_and_list():
+    with TestClient(app) as c:
+        # 1x1 PNG
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        )
+        from app.gallery import gallery as gal
+        owner = _test_user_subject()
+        item = gal.add(
+            owner=owner, kind="image", source="test",
+            mime="image/png", filename="test.png",
+            prompt="a tiny dot", model="gpt-image-1", size="1x1",
+            width=1, height=1, data=png_bytes,
+        )
+        assert item.id.startswith("gal_")
+        # List
+        r = c.get("/api/gallery", headers=USER_HEADERS)
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert any(i["id"] == item.id for i in items)
+        # Raw
+        r = c.get(f"/api/gallery/{item.id}/raw", headers=USER_HEADERS)
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        # Delete
+        r = c.delete(f"/api/gallery/{item.id}", headers=USER_HEADERS)
+        assert r.status_code == 200
+
+
+def test_gallery_owner_scoped():
+    with TestClient(app) as c:
+        from app.gallery import gallery as gal
+        item = gal.add(
+            owner="key_someone_else_12345678", kind="image", source="test",
+            mime="image/png", filename="x.png",
+            prompt="x", model="gpt-image-1", size="1x1",
+            data=b"\x89PNG\r\n\x1a\n",
+        )
+        r = c.delete(f"/api/gallery/{item.id}", headers=USER_HEADERS)
+        assert r.status_code == 404
