@@ -1,0 +1,56 @@
+name: aion-backend
+region: nyc
+services:
+  - name: api
+    github:
+      repo: ABBYCRM/aion-backend-v2
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 10
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      - key: APP_NAME
+        value: AION
+        scope: RUN_TIME
+        type: GENERAL
+      - key: APP_VERSION
+        value: 2.0.0
+        scope: RUN_TIME
+        type: GENERAL
+      - key: ENVIRONMENT
+        value: production
+        scope: RUN_TIME
+        type: GENERAL
+      - key: AION_DATA_DIR
+        value: /var/data
+        scope: RUN_TIME
+        type: GENERAL
+      - key: RATE_LIMIT_REQUESTS
+        value: "60"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: MAX_CONCURRENT_CHATS
+        value: "4"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: GITHUB_WRITE_ENABLED
+        value: "false"
+        scope: RUN_TIME
+        type: GENERAL
+# Configure AION_API_KEYS, AION_ADMIN_KEYS, CORS_ORIGINS, provider keys,
+# BRAVE_API_KEY, and GitHub App credentials as encrypted runtime variables
+# in the DigitalOcean control panel. They are deliberately absent here.

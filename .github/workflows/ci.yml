@@ -1,0 +1,30 @@
+name: backend-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: test
+      ALLOW_UNAUTHENTICATED_DEV: "false"
+      AION_API_KEYS: test-user-key
+      AION_ADMIN_KEYS: test-admin-key
+      NOTES_DB_PATH: /tmp/aion-test.sqlite3
+      AUDIT_LOG_PATH: /tmp/aion-audit.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q app
+      - run: python -m pytest -q
+      - run: docker build -t aion-backend:test .
