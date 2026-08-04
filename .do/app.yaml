@@ -24,15 +24,11 @@ services:
         scope: RUN_TIME
         type: GENERAL
       - key: APP_VERSION
-        value: 2.0.0
+        value: 2.1.0
         scope: RUN_TIME
         type: GENERAL
       - key: ENVIRONMENT
         value: production
-        scope: RUN_TIME
-        type: GENERAL
-      - key: AION_DATA_DIR
-        value: /var/data
         scope: RUN_TIME
         type: GENERAL
       - key: RATE_LIMIT_REQUESTS
@@ -51,6 +47,13 @@ services:
         value: "false"
         scope: RUN_TIME
         type: GENERAL
-# Configure AION_API_KEYS, AION_ADMIN_KEYS, CORS_ORIGINS, provider keys,
-# BRAVE_API_KEY, and GitHub App credentials as encrypted runtime variables
-# in the DigitalOcean control panel. They are deliberately absent here.
+# Required encrypted runtime variables: AION_API_KEYS, AION_ADMIN_KEYS,
+# CORS_ORIGINS, exact PRIMARY_PROVIDER/PRIMARY_MODEL (and optional explicit
+# provider:model FALLBACK_MODELS), plus provider keys.
+#
+# To enable durable notes and queryable audit history, attach a PostgreSQL
+# database to the App Platform app and set DATABASE_URL to its bindable
+# ${database-component.DATABASE_URL}. Local container files are ephemeral.
+#
+# Optional tools: BRAVE_API_KEY; GitHub App credentials and the mandatory
+# GITHUB_ALLOWED_REPOSITORIES allowlist. Writes remain disabled by default.
