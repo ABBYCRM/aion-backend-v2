@@ -201,8 +201,9 @@ async def scratchpad_list(
     tag: Optional[str] = None,
     q: Optional[str] = None,
     reveal: bool = False,
+    verify: bool = False,
 ) -> dict:
-    items = scratchpad.list(kind=kind, tag=tag, q=q, reveal=reveal)
+    items = scratchpad.list(kind=kind, tag=tag, q=q, reveal=reveal, verify=verify)
     if reveal:
         # Log every reveal of secrets
         for it in items:
@@ -252,8 +253,8 @@ async def scratchpad_lawset() -> dict:
 
 
 @app.get("/api/scratchpad/{entry_id}")
-async def scratchpad_get(entry_id: str, reveal: bool = False) -> dict:
-    e = scratchpad.get(entry_id, reveal=reveal)
+async def scratchpad_get(entry_id: str, reveal: bool = False, verify: bool = False) -> dict:
+    e = scratchpad.get(entry_id, reveal=reveal, verify=verify)
     if e is None:
         raise HTTPException(404, "scratchpad entry not found")
     if reveal and e.get("kind") in SECRET_KINDS and e.get("revealed"):
