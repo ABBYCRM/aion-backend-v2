@@ -173,15 +173,25 @@ async def decision(body: DecisionRequest, principal: Principal = Depends(authent
 @app.post("/api/search")
 async def search(body: SearchBody, _: Principal = Depends(authenticated)):
     results = await web_search.search(body.query, count=body.count, freshness=body.freshness); return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
+async def _github_ready() -> None:
+    if not (settings.github_token or settings.github_app_configured):
+        raise ToolConfigurationError("github_not_configured")
+
 @app.post("/api/github/repository")
-async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)): return await github.get_repository(body.repository)
+async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
+    _github_ready()
+    return await github.get_repository(body.repository)
 @app.post("/api/github/file")
-async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)): return await github.get_file(body.repository, body.path, body.ref)
+async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)):
+    _github_ready()
+    return await github.get_file(body.repository, body.path, body.ref)
 @app.post("/api/github/issues")
 async def github_issues(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
+    _github_ready()
     items = await github.list_issues(body.repository); return {"items": items, "count": len(items)}
 @app.post("/api/github/search")
 async def github_search(body: GitHubSearchBody, _: Principal = Depends(authenticated)):
+    _github_ready()
     items = await github.search_code(body.repository, body.query, limit=body.limit); return {"items": items, "count": len(items)}
 @app.post("/api/github/issues/create")
 async def github_create_issue(body: GitHubIssueWrite, principal: Principal = Depends(confirmed_admin)):
