@@ -225,7 +225,9 @@ async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
         import base64
         return {"ok": True, "mode": "server", "text": text, "voice": voice, "format": fmt, "audio_b64": base64.b64encode(audio_bytes).decode("ascii"), "size_bytes": len(audio_bytes)}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"tts_failed: {exc}") from exc
+        # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
+        audit.record("tts.failed", {"error": str(exc)[:200], "voice": voice, "text_len": len(text)})
+        return {"ok": False, "error": f"tts_failed: {exc}", "kind": "tts_error", "text": text, "voice": voice, "format": fmt, "mode": "client_fallback"}
 
 
 class ImageGenBody(BaseModel):
@@ -258,8 +260,8 @@ async def image_generate(body: ImageGenBody, principal: Principal = Depends(auth
         audit.record("image.generate.succeeded", {"subject": principal.subject, "model": body.model, "count": len(items)})
         return {"ok": True, "model": body.model, "items": items, "count": len(items)}
     except Exception as exc:
-        audit.record("image.generate.failed", {"subject": principal.subject, "model": body.model, "error": str(exc)[:200]})
-        raise HTTPException(status_code=502, detail=f"image_generate_failed: {exc}") from exc
+        # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
+        return {"ok": False, "error": f"image_generate_failed: {exc}", "kind": "image_error", "model": body.model, "items": [], "count": 0}
 
 
 class VideoGenBody(BaseModel):
@@ -305,8 +307,10 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
             if create_resp.status_code in (400, 403, 404) and ("model" in detail.lower() or "permission" in detail.lower() or "not found" in detail.lower()):
                 audit.record("video.generate.fallback", {"subject": principal.subject, "model": body.model, "reason": detail[:120]})
                 return {"ok": False, "fallback": "image_to_video", "reason": "sora_unavailable", "message": detail, "model": body.model}
-            audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "status": create_resp.status_code, "error": detail[:200]})
-            raise HTTPException(status_code=create_resp.status_code, detail=f"video_create_failed: {detail}")
+            # Any non-2xx from OpenAI = upstream error. Convert to clean
+            # 200+ok=false so the client gets parseable JSON (DO Cloudflare
+            # edge would otherwise wrap 5xx as HTML 504).
+            return {"ok": False, "error": f"video_create_failed: {detail}", "kind": "video_error", "model": body.model, "upstream_status": create_resp.status_code, "fallback": "image_to_video", "reason": "sora_unavailable"}
         job = create_resp.json()
         video_id = job.get("id")
         status = job.get("status", "queued")
@@ -323,6 +327,9 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
                 return {"ok": True, "model": body.model, "video_id": video_id, "status": last_job.get("status"), "progress": last_job.get("progress"), "timed_out": True, "message": "Job still running. Poll GET /api/video/{video_id} for status."}
             await asyncio.sleep(5)
             get_resp = await client.get(f"/videos/{video_id}", headers=headers)
+            if get_resp.status_code >= 500:
+                audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "stage": "poll", "error": _extract_error(get_resp)[:200]})
+                return {"ok": False, "error": f"video_status_failed: {_extract_error(get_resp)}", "kind": "video_error", "model": body.model, "video_id": video_id, "upstream_status": get_resp.status_code}
             if get_resp.status_code >= 400:
                 audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "error": _extract_error(get_resp)[:200]})
                 raise HTTPException(status_code=get_resp.status_code, detail=f"video_status_failed: {_extract_error(get_resp)}")
@@ -334,6 +341,9 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
             return {"ok": False, "model": body.model, "video_id": video_id, "status": last_job.get("status"), "error": last_job.get("error"), "raw": last_job}
         # Download the MP4
         content_resp = await client.get(f"/videos/{video_id}/content", headers=headers)
+        if content_resp.status_code >= 500:
+            audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "stage": "download", "error": _extract_error(content_resp)[:200]})
+            return {"ok": False, "error": f"video_download_failed: {_extract_error(content_resp)}", "kind": "video_error", "model": body.model, "video_id": video_id, "upstream_status": content_resp.status_code}
         if content_resp.status_code >= 400:
             audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "stage": "download", "error": _extract_error(content_resp)[:200]})
             raise HTTPException(status_code=content_resp.status_code, detail=f"video_download_failed: {_extract_error(content_resp)}")
@@ -349,6 +359,9 @@ async def video_status(video_id: str, _: Principal = Depends(authenticated)):
     import httpx
     async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=30, follow_redirects=False) as client:
         resp = await client.get(f"/videos/{video_id}", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
+        if resp.status_code >= 500:
+            # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
+            return {"ok": False, "error": _extract_error(resp), "kind": "video_status_error", "video_id": video_id, "upstream_status": resp.status_code}
         if resp.status_code >= 400: raise HTTPException(status_code=resp.status_code, detail=_extract_error(resp))
         return resp.json()
 
@@ -359,6 +372,11 @@ async def video_content(video_id: str, _: Principal = Depends(authenticated)):
     import httpx
     async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=120, follow_redirects=False) as client:
         resp = await client.get(f"/videos/{video_id}/content", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
+        if resp.status_code >= 500:
+            # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
+            return {"ok": False, "error": _extract_error(resp), "kind": "video_status_error", "video_id": video_id, "upstream_status": resp.status_code}
+        if resp.status_code >= 500:
+            return {"ok": False, "error": _extract_error(resp), "kind": "video_content_error", "video_id": video_id, "upstream_status": resp.status_code}
         if resp.status_code >= 400: raise HTTPException(status_code=resp.status_code, detail=_extract_error(resp))
         import base64
         return {"ok": True, "video_id": video_id, "mp4_b64": base64.b64encode(resp.content).decode("ascii"), "size_bytes": len(resp.content)}

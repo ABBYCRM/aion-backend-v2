@@ -144,4 +144,5 @@ def _hash_text(value: str) -> str:
     import hashlib
     return hashlib.sha256(value.encode()).hexdigest()[:16]
 
-web_search = BraveSearch(); github = GitHubClient()
+from .search_ddg import DuckDuckGoSearch, ChainedWebSearch
+web_search = ChainedWebSearch(brave=BraveSearch(), ddg=DuckDuckGoSearch()); github = GitHubClient()
