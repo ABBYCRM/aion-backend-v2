@@ -1,0 +1,249 @@
+"""
+AION Scratchpad — operator-scoped persistent memory for API keys,
+env snippets, project notes, and any other artifacts the chat should
+remember and reuse across sessions.
+
+Design goals:
+  - Local file storage (no DB, no external service) so it works on
+    the same ephemeral container as the audit log, with /tmp fallback.
+  - Secrets are masked in list responses; `?reveal=true` is required
+    to see the plaintext. All reveal/access events are audit-logged.
+  - Each entry has a kind (e.g. "api_key", "env", "note", "url",
+    "command", "snippet", "credential"), free-form tags, and a
+    name + value pair. A use_count + last_used_at track frequency.
+  - Search is plain substring match across name, tags, and (optional)
+    revealed value. Enough for the operator to recall things by feel
+    without building embeddings.
+"""
+from __future__ import annotations
+import json
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+_PATHS = [
+    Path("./data/scratchpad/entries.jsonl"),
+    Path("/tmp/aion-scratchpad/entries.jsonl"),
+]
+
+SECRET_KINDS = {"api_key", "secret", "credential", "token", "password", "private_key"}
+
+AUTO_DETECT_PATTERNS = [
+    (r"\bsk-[A-Za-z0-9_\-]{16,}\b", "api_key", "openai-style key"),
+    (r"\bsk-or-v1-[A-Za-z0-9_\-]{16,}\b", "api_key", "openrouter key"),
+    (r"\bsk-proj-[A-Za-z0-9_\-]{16,}\b", "api_key", "openai project key"),
+    (r"\bsk-ant-[A-Za-z0-9_\-]{16,}\b", "api_key", "anthropic key"),
+    (r"\bnvapi-[A-Za-z0-9_\-]{16,}\b", "api_key", "nvidia nim key"),
+    (r"\bghp_[A-Za-z0-9]{16,}\b", "token", "github pat"),
+    (r"\bghs_[A-Za-z0-9]{16,}\b", "token", "github app token"),
+    (r"\bgithub_pat_[A-Za-z0-9_]{16,}\b", "token", "github fine-grained pat"),
+    (r"\bhf_[A-Za-z0-9]{16,}\b", "token", "huggingface token"),
+    (r"\bdop_v1_[A-Za-z0-9_\-]{16,}\b", "token", "digitalocean pat"),
+    (r"\brnd_[A-Za-z0-9_\-]{16,}\b", "token", "render api key"),
+    (r"\bAIza[A-Za-z0-9_\-]{35}\b", "api_key", "google api key"),
+    (r"\bxox[abp]-[A-Za-z0-9\-]{10,}\b", "token", "slack token"),
+    (r"\bsk_live_[A-Za-z0-9]{16,}\b", "api_key", "stripe live key"),
+    (r"\bsk_test_[A-Za-z0-9]{16,}\b", "api_key", "stripe test key"),
+    (r"\bAKIA[0-9A-Z]{16}\b", "api_key", "aws access key id"),
+]
+
+_MASK_PREFIX = 4
+_MASK_SUFFIX = 4
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= _MASK_PREFIX + _MASK_SUFFIX + 2:
+        return "*" * len(value)
+    return f"{value[:_MASK_PREFIX]}{'*' * max(4, len(value) - _MASK_PREFIX - _MASK_SUFFIX)}{value[-_MASK_SUFFIX:]}"
+
+
+def _open_store() -> tuple:
+    for p in _PATHS:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.touch()
+            return p, False
+        except Exception:
+            continue
+    p = Path("/tmp/aion-scratchpad/entries.jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+    return p, True
+
+
+class Scratchpad:
+    def __init__(self):
+        self.path, _ = _open_store()
+
+    def _read_all(self) -> List[dict]:
+        out = []
+        try:
+            with self.path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return out
+
+    def _write_all(self, entries: List[dict]) -> None:
+        tmp = self.path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        tmp.replace(self.path)
+
+    def _append(self, entry: dict) -> None:
+        try:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            fallback = Path("/tmp/aion-scratchpad/entries.jsonl")
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            with fallback.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self.path = fallback
+
+    def add(self, *, name: str, value: str, kind: str = "note",
+            tags: Optional[List[str]] = None, source: str = "manual", notes: str = "") -> dict:
+        entry = {
+            "id": f"sp_{uuid.uuid4().hex[:12]}",
+            "name": name.strip(),
+            "kind": kind.strip().lower(),
+            "value": value,
+            "tags": [t.strip().lower() for t in (tags or []) if t and t.strip()],
+            "source": source,
+            "notes": notes,
+            "created_at": _now(),
+            "updated_at": _now(),
+            "last_used_at": 0,
+            "use_count": 0,
+        }
+        self._append(entry)
+        return entry
+
+    def list(self, *, kind: Optional[str] = None, tag: Optional[str] = None,
+             q: Optional[str] = None, reveal: bool = False) -> List[dict]:
+        items = self._read_all()
+        if kind:
+            items = [e for e in items if e.get("kind") == kind.lower()]
+        if tag:
+            tag_l = tag.lower()
+            items = [e for e in items if tag_l in (e.get("tags") or [])]
+        if q:
+            ql = q.lower()
+            items = [
+                e for e in items
+                if ql in (e.get("name") or "").lower()
+                or ql in (e.get("notes") or "").lower()
+                or any(ql in t for t in (e.get("tags") or []))
+                or (reveal and ql in (e.get("value") or "").lower())
+            ]
+        out = []
+        for e in items:
+            view = dict(e)
+            if e.get("kind") in SECRET_KINDS and not reveal:
+                view["value"] = _mask(e.get("value", ""))
+                view["revealed"] = False
+            else:
+                view["revealed"] = True
+            out.append(view)
+        return out
+
+    def get(self, entry_id: str, *, reveal: bool = False) -> Optional[dict]:
+        for e in self._read_all():
+            if e.get("id") == entry_id:
+                view = dict(e)
+                if e.get("kind") in SECRET_KINDS and not reveal:
+                    view["value"] = _mask(e.get("value", ""))
+                    view["revealed"] = False
+                else:
+                    view["revealed"] = True
+                return view
+        return None
+
+    def update(self, entry_id: str, patch: dict) -> Optional[dict]:
+        items = self._read_all()
+        out = None
+        for i, e in enumerate(items):
+            if e.get("id") == entry_id:
+                allowed = {"name", "value", "kind", "tags", "notes", "source"}
+                for k, v in patch.items():
+                    if k in allowed:
+                        e[k] = v
+                e["updated_at"] = _now()
+                items[i] = e
+                out = e
+                break
+        if out is not None:
+            self._write_all(items)
+        return out
+
+    def delete(self, entry_id: str) -> bool:
+        items = self._read_all()
+        new = [e for e in items if e.get("id") != entry_id]
+        if len(new) == len(items):
+            return False
+        self._write_all(new)
+        return True
+
+    def use(self, entry_id: str) -> Optional[dict]:
+        items = self._read_all()
+        for i, e in enumerate(items):
+            if e.get("id") == entry_id:
+                e["use_count"] = int(e.get("use_count", 0)) + 1
+                e["last_used_at"] = _now()
+                items[i] = e
+                self._write_all(items)
+                return e
+        return None
+
+    def stats(self) -> dict:
+        items = self._read_all()
+        by_kind = {}
+        secret_count = 0
+        for e in items:
+            k = e.get("kind", "note")
+            by_kind[k] = by_kind.get(k, 0) + 1
+            if k in SECRET_KINDS:
+                secret_count += 1
+        return {
+            "total": len(items),
+            "by_kind": by_kind,
+            "secrets": secret_count,
+            "path": str(self.path),
+        }
+
+    def detect_in_text(self, text: str) -> List[dict]:
+        if not text:
+            return []
+        out = []
+        seen = set()
+        for pat, kind, hint in AUTO_DETECT_PATTERNS:
+            for m in re.finditer(pat, text):
+                v = m.group(0)
+                if v in seen:
+                    continue
+                seen.add(v)
+                out.append({"value": v, "kind": kind, "hint": hint, "preview": _mask(v)})
+        return out
+
+
+scratchpad = Scratchpad()
