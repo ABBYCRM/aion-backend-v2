@@ -1,4 +1,4 @@
-"""AION Settings - env-only, no pydantic-settings dependency."""
+"""AION Settings - env-only."""
 import os
 class Settings:
     def __init__(self):
