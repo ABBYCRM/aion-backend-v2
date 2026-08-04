@@ -278,13 +278,19 @@ if _os.path.isdir(_STATIC_DIR):
 @app.on_event("startup")
 async def on_startup() -> None:
     audit.record("aion.startup", {"version": settings.app_version, "env": settings.environment})
-    try:
-        providers = await probe()
-        audit.record("aion.providers_probe", providers)
-        for p, info in providers.items():
-            print(f"[AION] provider={p} ok={info.get('ok')} models={info.get('model_count', '?')}")
-    except Exception as e:
-        print(f"[AION] startup probe failed: {e}")
+    # Run the live provider probe in the background so it never blocks startup.
+    # If a provider is slow/unreachable, the server should still come up and
+    # serve /healthz; the probe result lands in the audit log.
+    async def _bg_probe() -> None:
+        try:
+            providers = await probe()
+            audit.record("aion.providers_probe", providers)
+            for p, info in providers.items():
+                print(f"[AION] provider={p} ok={info.get('ok')} models={info.get('model_count', '?')}")
+        except Exception as e:
+            print(f"[AION] startup probe failed: {e}")
+            audit.record("aion.providers_probe_failed", {"error": str(e)})
+    asyncio.create_task(_bg_probe())
 
 
 @app.on_event("shutdown")
