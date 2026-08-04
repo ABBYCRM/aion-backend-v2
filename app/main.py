@@ -1,26 +1,21 @@
-import os, sys
-print("PYTHON:", sys.executable, flush=True)
-print("PWD:", os.getcwd(), flush=True)
-print("PYTHONHOME:", os.environ.get("PYTHONHOME"), flush=True)
-print("PATH:", os.environ.get("PATH"), flush=True)
-try:
-    import fastapi
-    print("fastapi:", fastapi.__version__, fastapi.__file__, flush=True)
-except Exception as e:
-    print("fastapi FAIL:", e, flush=True)
-try:
-    import pydantic_settings
-    print("pydantic_settings:", pydantic_settings.__version__, flush=True)
-except Exception as e:
-    print("pydantic_settings FAIL:", e, flush=True)
-try:
-    import openai
-    print("openai:", openai.__version__, flush=True)
-except Exception as e:
-    print("openai FAIL:", e, flush=True)
-
+import os
 from fastapi import FastAPI
 app = FastAPI()
 @app.get("/healthz")
 def h():
-    return {"ok": True, "py": sys.executable, "fastapi": fastapi.__file__}
+    try:
+        from . import settings as s
+        return {"ok": True, "imported": True}
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+@app.get("/test_settings")
+def t():
+    try:
+        import os
+        os.environ.setdefault("APP_NAME", "AION")
+        os.environ.setdefault("OPENROUTER_API_KEY", "test123")
+        from .settings import settings
+        return {"ok": True, "name": settings.app_name, "key_len": len(settings.openrouter_api_key)}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "err": str(e), "trace": traceback.format_exc()[:500]}
