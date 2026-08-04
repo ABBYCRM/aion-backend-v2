@@ -2,262 +2,629 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import re
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncIterator, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .audit import audit
-from .auth import Principal, require_admin, require_principal
+from .auth import Principal, require_principal
 from .kernel import AION_CONTINUITY_PACK, MissionContext, build_system_prompt, resolve_decision
-from .llm import AllProvidersFailed, InvalidModelSelection, configured_providers, list_models, probe, resolve_model_chain, stream_chat
-from .notes import SecretLikeValue, notes
+from .llm import (
+    AllProvidersFailed,
+    InvalidModelSelection,
+    configured_providers,
+    list_models,
+    probe,
+    resolve_model_chain,
+    stream_chat,
+)
+from .notes import NotesUnavailable, SecretLikeValue, notes
 from .rate_limit import enforce_rate_limit, limiter
 from .settings import settings
 from .tools import ToolConfigurationError, ToolRequestError, github, web_search
 
 _GITHUB_URL = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.I)
+_IMAGE_RE = re.compile(r"^data:image/(?P<kind>png|jpeg|webp|gif);base64,(?P<data>[A-Za-z0-9+/=\r\n]+)$", re.I)
+_IMAGE_MAGIC = {
+    "png": lambda value: value.startswith(b"\x89PNG\r\n\x1a\n"),
+    "jpeg": lambda value: value.startswith(b"\xff\xd8\xff"),
+    "gif": lambda value: value.startswith((b"GIF87a", b"GIF89a")),
+    "webp": lambda value: len(value) >= 12 and value[:4] == b"RIFF" and value[8:12] == b"WEBP",
+}
+
 
 class TextPart(BaseModel):
     type: Literal["text"]
     text: str = Field(min_length=1, max_length=settings.max_message_chars)
 
+
 class ImageURL(BaseModel):
-    url: str = Field(min_length=32, max_length=1_500_000)
+    url: str = Field(min_length=32, max_length=(settings.max_image_bytes * 4 // 3) + 256)
+
     @field_validator("url")
     @classmethod
     def validate_data_image(cls, value: str) -> str:
-        allowed = ("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,", "data:image/gif;base64,")
-        if not value.startswith(allowed): raise ValueError("only_base64_image_data_urls_are_allowed")
+        _decode_image(value)
         return value
+
 
 class ImagePart(BaseModel):
     type: Literal["image_url"]
     image_url: ImageURL
 
+
 ContentPart = Annotated[TextPart | ImagePart, Field(discriminator="type")]
+
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str | list[ContentPart]
+
     @field_validator("content")
     @classmethod
-    def validate_content(cls, value):
+    def validate_content(cls, value: str | list[ContentPart]):
         if isinstance(value, str):
-            if not value.strip() or len(value) > settings.max_message_chars: raise ValueError("invalid_message_content")
+            if not value.strip() or len(value) > settings.max_message_chars:
+                raise ValueError("invalid_message_content")
             return value
-        if not value or len(value) > 12: raise ValueError("invalid_content_parts")
-        if sum(len(part.text) for part in value if isinstance(part, TextPart)) > settings.max_message_chars: raise ValueError("message_text_too_large")
+        if not value or len(value) > settings.max_attachment_count + 1:
+            raise ValueError("invalid_content_parts")
+        text_chars = sum(len(part.text) for part in value if isinstance(part, TextPart))
+        if text_chars > settings.max_message_chars:
+            raise ValueError("message_text_too_large")
         return value
-    def wire_content(self): return self.content if isinstance(self.content, str) else [part.model_dump() for part in self.content]
-    def text_content(self): return self.content if isinstance(self.content, str) else "\n".join(part.text for part in self.content if isinstance(part, TextPart)).strip()
+
+    def wire_content(self):
+        return self.content if isinstance(self.content, str) else [part.model_dump() for part in self.content]
+
+    def text_content(self) -> str:
+        if isinstance(self.content, str):
+            return self.content
+        return "\n".join(part.text for part in self.content if isinstance(part, TextPart)).strip()
+
+    def image_urls(self) -> list[str]:
+        if isinstance(self.content, str):
+            return []
+        return [part.image_url.url for part in self.content if isinstance(part, ImagePart)]
+
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=settings.max_context_messages)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=1024, ge=settings.min_completion_tokens, le=settings.max_completion_tokens)
+    max_tokens: int = Field(
+        default=1024,
+        ge=settings.min_completion_tokens,
+        le=settings.max_completion_tokens,
+    )
     model: str | None = Field(default=None, min_length=1, max_length=300)
     provider: str | None = Field(default=None, min_length=1, max_length=40)
     web_search: bool = False
     github_repository: str | None = Field(default=None, max_length=200)
     github_path: str | None = Field(default=None, max_length=1000)
     github_query: str | None = Field(default=None, max_length=200)
-    use_notes: bool = True
+    use_notes: bool = False
+
     @model_validator(mode="after")
-    def pair(self):
-        if bool(self.model) != bool(self.provider): raise ValueError("provider_and_model_are_required_together")
+    def validate_request(self):
+        if bool(self.model) != bool(self.provider):
+            raise ValueError("provider_and_model_are_required_together")
+        total_text = sum(len(message.text_content()) for message in self.messages)
+        if total_text > settings.max_total_message_chars:
+            raise ValueError("conversation_text_too_large")
+        images = [url for message in self.messages for url in message.image_urls()]
+        if len(images) > settings.max_attachment_count:
+            raise ValueError("too_many_image_attachments")
+        total_image_bytes = sum(len(_decode_image(url)) for url in images)
+        if total_image_bytes > settings.max_total_attachment_bytes:
+            raise ValueError("total_attachment_bytes_exceeded")
         return self
 
+
 class DecisionRequest(BaseModel):
-    user_input: str = Field(min_length=1, max_length=20000)
+    user_input: str = Field(min_length=1, max_length=20_000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=100)
+
+
 class NoteBody(BaseModel):
-    name: str = Field(min_length=1, max_length=200); kind: Literal["note", "project", "url", "instruction"] = "note"; value: str = Field(min_length=1, max_length=20000); tags: list[str] = Field(default_factory=list, max_length=20)
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["note", "project", "url"] = "note"
+    value: str = Field(min_length=1, max_length=20_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
 class SearchBody(BaseModel):
-    query: str = Field(min_length=1, max_length=400); count: int = Field(default=6, ge=1, le=20); freshness: Literal["pd", "pw", "pm", "py"] | None = None
-class GitHubRepoBody(BaseModel): repository: str = Field(min_length=3, max_length=200)
-class GitHubFileBody(GitHubRepoBody): path: str = Field(min_length=1, max_length=1000); ref: str | None = Field(default=None, max_length=200)
-class GitHubSearchBody(GitHubRepoBody): query: str = Field(min_length=1, max_length=200); limit: int = Field(default=10, ge=1, le=30)
-class GitHubIssueWrite(GitHubRepoBody): title: str = Field(min_length=1, max_length=256); body: str = Field(default="", max_length=60000)
-class GitHubBranchWrite(GitHubRepoBody): branch: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._/-]+$"); base: str = Field(default="main", min_length=1, max_length=200)
-class GitHubFileWrite(GitHubRepoBody): path: str = Field(min_length=1, max_length=1000); content: str = Field(max_length=500000); message: str = Field(min_length=1, max_length=250); branch: str = Field(min_length=1, max_length=200)
-class GitHubPullWrite(GitHubRepoBody): title: str = Field(min_length=1, max_length=256); body: str = Field(default="", max_length=60000); head: str = Field(min_length=1, max_length=200); base: str = Field(default="main", min_length=1, max_length=200)
+    query: str = Field(min_length=1, max_length=400)
+    count: int = Field(default=6, ge=1, le=20)
+    freshness: Literal["pd", "pw", "pm", "py"] | None = None
+
+
+class GitHubRepoBody(BaseModel):
+    repository: str = Field(min_length=3, max_length=200)
+
+
+class GitHubFileBody(GitHubRepoBody):
+    path: str = Field(min_length=1, max_length=1000)
+    ref: str | None = Field(default=None, max_length=200)
+
+
+class GitHubSearchBody(GitHubRepoBody):
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=10, ge=1, le=30)
+
+
+class GitHubIssueWrite(GitHubRepoBody):
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=60_000)
+
+
+class GitHubBranchWrite(GitHubRepoBody):
+    branch: str = Field(min_length=1, max_length=200)
+    base: str = Field(default="main", min_length=1, max_length=200)
+
+
+class GitHubFileWrite(GitHubRepoBody):
+    path: str = Field(min_length=1, max_length=1000)
+    content: str = Field(max_length=500_000)
+    message: str = Field(min_length=1, max_length=250)
+    branch: str = Field(min_length=1, max_length=200)
+
+
+class GitHubPullWrite(GitHubRepoBody):
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=60_000)
+    head: str = Field(min_length=1, max_length=200)
+    base: str = Field(default="main", min_length=1, max_length=200)
+
 
 class BodyLimitMiddleware:
-    def __init__(self, app: Any, max_bytes: int): self.app = app; self.max_bytes = max_bytes
+    """Buffer a bounded request body and replay it to FastAPI."""
+
+    def __init__(self, app: Any, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http": return await self.app(scope, receive, send)
-        headers = {key.lower(): value for key, value in scope.get("headers", [])}; length = headers.get(b"content-length")
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        length = headers.get(b"content-length")
         if length:
             try:
-                if int(length) > self.max_bytes: return await JSONResponse(status_code=413, content={"detail": "request_too_large"})(scope, receive, send)
-            except ValueError: pass
-        received = 0
-        async def limited_receive():
-            nonlocal received
+                if int(length) > self.max_bytes:
+                    await _send_json(send, 413, "request_too_large")
+                    return
+            except ValueError:
+                await _send_json(send, 400, "invalid_content_length")
+                return
+        chunks: list[bytes] = []
+        total = 0
+        while True:
             message = await receive()
-            if message.get("type") == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.max_bytes: raise HTTPException(status_code=413, detail="request_too_large")
-            return message
-        try: await self.app(scope, limited_receive, send)
-        except HTTPException as exc: await JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})(scope, receive, send)
+            if message.get("type") == "http.disconnect":
+                return
+            if message.get("type") != "http.request":
+                continue
+            chunk = message.get("body", b"")
+            total += len(chunk)
+            if total > self.max_bytes:
+                await _send_json(send, 413, "request_too_large")
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings.validate_startup(); audit.record("aion.startup", {"version": settings.app_version, "environment": settings.environment}); yield; audit.record("aion.shutdown", {})
+    settings.validate_startup()
+    notes.initialize()
+    audit.initialize()
+    audit.record(
+        "aion.startup",
+        {
+            "version": settings.app_version,
+            "environment": settings.environment,
+            "notes": notes.status(),
+            "audit": audit.status(),
+        },
+    )
+    try:
+        yield
+    finally:
+        audit.record("aion.shutdown", {})
+        notes.close()
+        audit.close()
 
-app = FastAPI(title=f"{settings.app_name} Runtime", version=settings.app_version, description="Authenticated AION runtime with web and GitHub tools", docs_url=None if settings.environment == "production" else "/docs", redoc_url=None, lifespan=lifespan)
+
+app = FastAPI(
+    title=f"{settings.app_name} Runtime",
+    version=settings.app_version,
+    description="Authenticated AION runtime with bounded web and GitHub tools",
+    docs_url=None if settings.environment == "production" else "/docs",
+    redoc_url=None,
+    lifespan=lifespan,
+)
 app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
-app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"], max_age=600)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"],
+    max_age=600,
+)
+
 
 @app.exception_handler(ToolConfigurationError)
-async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=503, content={"detail": str(exc)})
-@app.exception_handler(ToolRequestError)
-async def tool_request(_: Request, exc: ToolRequestError): return JSONResponse(status_code=400, content={"detail": str(exc)})
+async def tool_config(_: Request, exc: ToolConfigurationError):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
-async def authenticated(request: Request, principal: Principal = Depends(require_principal)):
-    await enforce_rate_limit(request, principal); return principal
-async def confirmed_admin(principal: Principal = Depends(require_admin), confirmation: str | None = Header(default=None, alias="X-AION-Confirm")):
-    if (confirmation or "").strip().lower() != "yes": raise HTTPException(status_code=409, detail="explicit_confirmation_required")
+
+@app.exception_handler(ToolRequestError)
+async def tool_request(_: Request, exc: ToolRequestError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+
+async def authenticated(principal: Principal = Depends(require_principal)) -> Principal:
+    await enforce_rate_limit(principal)
     return principal
 
+
+async def admin_authenticated(principal: Principal = Depends(authenticated)) -> Principal:
+    if not principal.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
+    return principal
+
+
+async def confirmed_admin(
+    principal: Principal = Depends(admin_authenticated),
+    confirmation: str | None = Header(default=None, alias="X-AION-Confirm"),
+) -> Principal:
+    if (confirmation or "").strip().lower() != "yes":
+        raise HTTPException(status_code=409, detail="explicit_confirmation_required")
+    return principal
+
+
 @app.get("/healthz")
-async def healthz(): return {"ok": True, "service": settings.app_name, "version": settings.app_version, "timestamp": int(time.time())}
+async def healthz():
+    return {"ok": True, "service": settings.app_name, "version": settings.app_version, "timestamp": int(time.time())}
+
+
 @app.get("/readyz")
 async def readyz():
-    providers = configured_providers(); return JSONResponse(status_code=200 if providers else 503, content={"ok": bool(providers), "service": settings.app_name, "version": settings.app_version, "configured_provider_count": len(providers)})
+    providers = configured_providers()
+    model_configured = bool(settings.model_refs)
+    ok = bool(providers and model_configured)
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "ok": ok,
+            "service": settings.app_name,
+            "version": settings.app_version,
+            "configured_provider_count": len(providers),
+            "configured_model_count": len(settings.model_refs),
+            "notes": notes.status(),
+            "audit": audit.status(),
+        },
+    )
+
+
 @app.get("/api/continuity-pack")
-async def continuity_pack(_: Principal = Depends(authenticated)): return AION_CONTINUITY_PACK
+async def continuity_pack(_: Principal = Depends(authenticated)):
+    return AION_CONTINUITY_PACK
+
+
 @app.get("/api/models")
-async def models(_: Principal = Depends(authenticated)): return {"chain": settings.model_chain, "primary": settings.primary_model, "providers": await probe()}
+async def models(_: Principal = Depends(authenticated)):
+    return {"chain": settings.model_chain, "primary": settings.model_chain[0] if settings.model_chain else None, "providers": await probe()}
+
+
 @app.get("/api/models/all")
 async def models_all(_: Principal = Depends(authenticated)):
-    providers = await list_models(refresh=False); flat = [{"provider": provider, "model": model} for provider, info in providers.items() if info.get("ok") for model in info.get("models", [])]
-    return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
+    providers = await list_models(refresh=False)
+    flat = [{"provider": provider, "model": model} for provider, info in providers.items() if info.get("ok") for model in info.get("models", [])]
+    return {"providers": providers, "flat": flat, "chain": settings.model_chain}
+
+
 @app.get("/api/audit/recent")
-async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
+async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(admin_authenticated)):
+    return {"events": audit.recent(n), "status": audit.status()}
+
+
+def _notes_or_503():
+    if not notes.available:
+        raise HTTPException(status_code=503, detail="notes_require_database_url_in_production")
+
+
+@app.get("/api/notes/status")
+async def notes_status(_: Principal = Depends(authenticated)):
+    return notes.status()
+
 
 @app.get("/api/notes")
 async def list_notes(q: str = Query(default="", max_length=200), limit: int = Query(default=50, ge=1, le=100), principal: Principal = Depends(authenticated)):
-    items = notes.list(principal.subject, query=q, limit=limit); return {"items": items, "count": len(items)}
+    _notes_or_503()
+    items = notes.list(principal.subject, query=q, limit=limit)
+    return {"items": items, "count": len(items), "status": notes.status()}
+
+
 @app.post("/api/notes")
 async def add_note(body: NoteBody, principal: Principal = Depends(authenticated)):
-    try: item = notes.add(principal.subject, **body.model_dump())
-    except SecretLikeValue as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
-    audit.record("notes.add", {"subject": principal.subject, "note_id": item["id"], "kind": item["kind"]}); return item
+    _notes_or_503()
+    try:
+        item = notes.add(principal.subject, **body.model_dump())
+    except SecretLikeValue as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit.record("notes.add", {"subject": principal.subject, "note_id": item["id"], "kind": item["kind"]})
+    return item
+
+
 @app.put("/api/notes/{note_id}")
 async def update_note(note_id: str, body: NoteBody, principal: Principal = Depends(authenticated)):
-    try: item = notes.update(principal.subject, note_id, **body.model_dump())
-    except SecretLikeValue as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if item is None: raise HTTPException(status_code=404, detail="note_not_found")
-    audit.record("notes.update", {"subject": principal.subject, "note_id": note_id}); return item
+    _notes_or_503()
+    try:
+        item = notes.update(principal.subject, note_id, **body.model_dump())
+    except SecretLikeValue as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if item is None:
+        raise HTTPException(status_code=404, detail="note_not_found")
+    audit.record("notes.update", {"subject": principal.subject, "note_id": note_id})
+    return item
+
+
 @app.delete("/api/notes/{note_id}")
 async def delete_note(note_id: str, principal: Principal = Depends(authenticated)):
-    if not notes.delete(principal.subject, note_id): raise HTTPException(status_code=404, detail="note_not_found")
-    audit.record("notes.delete", {"subject": principal.subject, "note_id": note_id}); return {"ok": True, "id": note_id}
+    _notes_or_503()
+    if not notes.delete(principal.subject, note_id):
+        raise HTTPException(status_code=404, detail="note_not_found")
+    audit.record("notes.delete", {"subject": principal.subject, "note_id": note_id})
+    return {"ok": True, "id": note_id}
+
+
 @app.get("/api/scratchpad")
-async def legacy_scratchpad(principal: Principal = Depends(authenticated)):
-    items = notes.list(principal.subject, limit=50); return {"items": items, "count": len(items), "mode": "notes_only"}
+async def legacy_scratchpad(_: Principal = Depends(authenticated)):
+    raise HTTPException(status_code=410, detail="scratchpad_removed_use_non_secret_notes")
+
 
 @app.post("/api/decision")
 async def decision(body: DecisionRequest, principal: Principal = Depends(authenticated)):
-    context = MissionContext(user_input=body.user_input, history=[{"role": message.role, "content": message.text_content()} for message in body.history]); result = resolve_decision(context)
-    audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value}); return {"request_id": context.request_id, "decision": result.to_dict()}
+    context = MissionContext(user_input=body.user_input, history=[{"role": message.role, "content": message.text_content()} for message in body.history])
+    result = resolve_decision(context)
+    audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value})
+    return {"request_id": context.request_id, "decision": result.to_dict()}
+
+
 @app.post("/api/search")
 async def search(body: SearchBody, _: Principal = Depends(authenticated)):
-    results = await web_search.search(body.query, count=body.count, freshness=body.freshness); return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
+    results = await web_search.search(body.query, count=body.count, freshness=body.freshness)
+    return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
+
+
 @app.post("/api/github/repository")
-async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)): return await github.get_repository(body.repository)
+async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
+    return await github.get_repository(body.repository)
+
+
 @app.post("/api/github/file")
-async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)): return await github.get_file(body.repository, body.path, body.ref)
+async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)):
+    return await github.get_file(body.repository, body.path, body.ref)
+
+
 @app.post("/api/github/issues")
 async def github_issues(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
-    items = await github.list_issues(body.repository); return {"items": items, "count": len(items)}
+    items = await github.list_issues(body.repository)
+    return {"items": items, "count": len(items)}
+
+
 @app.post("/api/github/search")
 async def github_search(body: GitHubSearchBody, _: Principal = Depends(authenticated)):
-    items = await github.search_code(body.repository, body.query, limit=body.limit); return {"items": items, "count": len(items)}
+    items = await github.search_code(body.repository, body.query, limit=body.limit)
+    return {"items": items, "count": len(items)}
+
+
 @app.post("/api/github/issues/create")
 async def github_create_issue(body: GitHubIssueWrite, principal: Principal = Depends(confirmed_admin)):
-    result = await github.create_issue(body.repository, body.title, body.body); audit.record("github.issue_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]}); return result
+    result = await github.create_issue(body.repository, body.title, body.body)
+    audit.record("github.issue_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]})
+    return result
+
+
 @app.post("/api/github/branches/create")
 async def github_create_branch(body: GitHubBranchWrite, principal: Principal = Depends(confirmed_admin)):
-    result = await github.create_branch(body.repository, body.branch, body.base); audit.record("github.branch_created", {"subject": principal.subject, "repository": body.repository, "branch": body.branch}); return result
+    result = await github.create_branch(body.repository, body.branch, body.base)
+    audit.record("github.branch_created", {"subject": principal.subject, "repository": body.repository, "branch": body.branch})
+    return result
+
+
 @app.post("/api/github/files/upsert")
 async def github_upsert_file(body: GitHubFileWrite, principal: Principal = Depends(confirmed_admin)):
-    result = await github.upsert_file(body.repository, body.path, body.content, body.message, body.branch); audit.record("github.file_upserted", {"subject": principal.subject, "repository": body.repository, "path": body.path}); return result
+    result = await github.upsert_file(body.repository, body.path, body.content, body.message, body.branch)
+    audit.record("github.file_upserted", {"subject": principal.subject, "repository": body.repository, "path": body.path})
+    return result
+
+
 @app.post("/api/github/pulls/create")
 async def github_create_pull(body: GitHubPullWrite, principal: Principal = Depends(confirmed_admin)):
-    result = await github.create_pull_request(body.repository, body.title, body.body, body.head, body.base); audit.record("github.pull_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]}); return result
+    result = await github.create_pull_request(body.repository, body.title, body.body, body.head, body.base)
+    audit.record("github.pull_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]})
+    return result
+
+
 @app.post("/api/tts")
-async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
-    text = str(body.get("text") or "").strip()
-    if not text: raise HTTPException(status_code=400, detail="text_required")
-    return {"ok": True, "mode": "client", "text": text[:settings.max_message_chars]}
+async def tts(_: Principal = Depends(authenticated)):
+    raise HTTPException(status_code=501, detail="tts_not_implemented")
+
 
 @app.post("/api/chat")
 async def chat(body: ChatRequest, principal: Principal = Depends(authenticated)):
     last_user = next((message for message in reversed(body.messages) if message.role == "user"), None)
-    if last_user is None: raise HTTPException(status_code=400, detail="user_message_required")
-    user_text = last_user.text_content(); tool_contexts = []; tool_events = []; tool_errors = []
+    if last_user is None:
+        raise HTTPException(status_code=400, detail="user_message_required")
+    user_text = last_user.text_content()
+    tool_contexts: list[str] = []
+    tool_events: list[dict[str, Any]] = []
+    tool_errors: list[str] = []
+
     search_query = _search_query(body.web_search, user_text)
     if search_query:
         try:
-            results = await web_search.search(search_query); context = web_search.as_context(results)
-            if context: tool_contexts.append(context)
+            results = await web_search.search(search_query)
+            _append_context(tool_contexts, web_search.as_context(results))
             tool_events.append({"type": "tool", "tool": "web_search", "query": search_query, "results": [result.__dict__ for result in results]})
-        except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
+        except (ToolConfigurationError, ToolRequestError) as exc:
+            tool_errors.append(str(exc))
+            tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
+
     repository, github_mode, github_argument = _github_request(body, user_text)
     if repository:
         try:
-            if github_mode == "file" and github_argument: result = await github.get_file(repository, github_argument)
-            elif github_mode == "search" and github_argument: result = await github.search_code(repository, github_argument)
-            elif github_mode == "issues": result = await github.list_issues(repository)
-            else: result = await github.get_repository(repository)
-            tool_contexts.append(github.as_context(github_mode, repository, result)); tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
-        except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
-    mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
-    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "")
+            if github_mode == "file" and github_argument:
+                result = await github.get_file(repository, github_argument)
+            elif github_mode == "search" and github_argument:
+                result = await github.search_code(repository, github_argument)
+            elif github_mode == "issues":
+                result = await github.list_issues(repository)
+            else:
+                result = await github.get_repository(repository)
+            _append_context(tool_contexts, github.as_context(github_mode, repository, result))
+            tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
+        except (ToolConfigurationError, ToolRequestError) as exc:
+            tool_errors.append(str(exc))
+            tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
+
+    mission = MissionContext(
+        user_input=user_text or "image attachment",
+        history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]],
+        metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors},
+    )
+    decision_result = resolve_decision(mission)
+    notes_context = ""
+    if body.use_notes:
+        if not notes.available:
+            raise HTTPException(status_code=503, detail="notes_require_database_url_in_production")
+        notes_context = notes.context(principal.subject, user_text)
+    system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes_context)
     model_messages = [{"role": "system", "content": system_prompt}, *({"role": message.role, "content": message.wire_content()} for message in body.messages)]
     model_messages = [model_messages[0], *model_messages[1:][-(settings.max_context_messages - 1):]]
-    try: model_chain = await resolve_model_chain(body.provider, body.model)
-    except InvalidModelSelection as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except AllProvidersFailed as exc: raise HTTPException(status_code=503, detail=str(exc)) from exc
-    audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository)})
+    try:
+        model_chain = await resolve_model_chain(body.provider, body.model)
+    except InvalidModelSelection as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AllProvidersFailed as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository), "notes": body.use_notes})
+
     async def events() -> AsyncIterator[bytes]:
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
-        for event in tool_events: yield _sse(event)
-        async with limiter.chat_slot():
-            try:
-                async for event_type, payload in stream_chat(model_chain=model_chain, messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, request_id=mission.request_id):
-                    yield _sse({"type": event_type, **payload}); await asyncio.sleep(0)
-            except AllProvidersFailed as exc:
-                yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
+        for event in tool_events:
+            yield _sse(event)
+        try:
+            async with limiter.chat_slot():
+                try:
+                    async for event_type, payload in stream_chat(model_chain=model_chain, messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, request_id=mission.request_id):
+                        yield _sse({"type": event_type, **payload})
+                        await asyncio.sleep(0)
+                except AllProvidersFailed as exc:
+                    yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)})
+                    audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
+        except HTTPException as exc:
+            yield _sse({"type": "error", "kind": "capacity", "message": str(exc.detail)})
         yield b"data: [DONE]\n\n"
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value})
 
-def _sse(payload): return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
-def _search_query(enabled, text):
-    stripped = text.strip(); return stripped[8:].strip()[:400] if stripped.lower().startswith("/search ") else stripped[:400] if enabled else ""
-def _github_request(body, text):
-    repository = body.github_repository or ""; mode = "repository"; argument = ""; stripped = text.strip()
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value},
+    )
+
+
+def _decode_image(value: str) -> bytes:
+    match = _IMAGE_RE.fullmatch(value)
+    if not match:
+        raise ValueError("invalid_base64_image_data_url")
+    try:
+        decoded = base64.b64decode(match.group("data"), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid_base64_image") from exc
+    if not decoded or len(decoded) > settings.max_image_bytes:
+        raise ValueError("image_too_large")
+    kind = match.group("kind").lower()
+    if not _IMAGE_MAGIC[kind](decoded):
+        raise ValueError("image_signature_mismatch")
+    return decoded
+
+
+def _append_context(contexts: list[str], value: str) -> None:
+    if not value:
+        return
+    used = sum(len(item) for item in contexts)
+    remaining = settings.max_tool_context_chars - used
+    if remaining > 0:
+        contexts.append(value[:remaining])
+
+
+def _sse(payload: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+
+
+async def _send_json(send, status_code: int, detail: str) -> None:
+    encoded = json.dumps({"detail": detail}, separators=(",", ":")).encode()
+    await send({"type": "http.response.start", "status": status_code, "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(encoded)).encode())]})
+    await send({"type": "http.response.body", "body": encoded})
+
+
+def _search_query(enabled: bool, text: str) -> str:
+    stripped = text.strip()
+    if stripped.lower().startswith("/search "):
+        return stripped[8:].strip()[:400]
+    return stripped[:400] if enabled else ""
+
+
+def _github_request(body: ChatRequest, text: str) -> tuple[str, str, str]:
+    repository = body.github_repository or ""
+    mode = "repository"
+    argument = ""
+    stripped = text.strip()
     if stripped.lower().startswith("/github "):
         command = stripped[8:].strip().split(maxsplit=2)
-        if command: repository = command[0]
+        if command:
+            repository = command[0]
         if len(command) >= 2:
             action = command[1].lower()
-            if action in {"issues", "repo", "repository"}: mode = "issues" if action == "issues" else "repository"
-            elif action == "file" and len(command) == 3: mode, argument = "file", command[2]
-            elif action == "search" and len(command) == 3: mode, argument = "search", command[2]
-    elif body.github_path: mode, argument = "file", body.github_path
-    elif body.github_query: mode, argument = "search", body.github_query
+            if action in {"issues", "repo", "repository"}:
+                mode = "issues" if action == "issues" else "repository"
+            elif action == "file" and len(command) == 3:
+                mode, argument = "file", command[2]
+            elif action == "search" and len(command) == 3:
+                mode, argument = "search", command[2]
+    elif body.github_path:
+        mode, argument = "file", body.github_path
+    elif body.github_query:
+        mode, argument = "search", body.github_query
     elif not repository:
         match = _GITHUB_URL.search(text)
-        if match: repository = match.group(0)
+        if match:
+            repository = match.group(0)
     return repository, mode, argument
