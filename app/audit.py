@@ -14,7 +14,12 @@ from .settings import settings
 class AuditLog:
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = Path(path or settings.audit_log_dir) / "audit.jsonl"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            # Audit must never break startup. Fall back to /tmp.
+            print(f"[AION-AUDIT] init mkdir failed ({exc}); using /tmp/aion-audit.log")
+            self.path = Path("/tmp/aion-audit.log")
 
     def record(self, event: str, payload: Dict[str, Any]) -> None:
         entry = {
@@ -23,16 +28,23 @@ class AuditLog:
             "event": event,
             **payload,
         }
-        try:
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as exc:  # audit must never crash the request
-            print(f"[AION-AUDIT] failed to write: {exc}")
+        # Try primary path; on any failure, fall back to /tmp.
+        for p in [self.path, Path("/tmp/aion-audit.log")]:
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with p.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                if p != self.path:
+                    self.path = p  # adopt the working path
+                return
+            except Exception as exc:
+                continue
+        print(f"[AION-AUDIT] all write attempts failed for event={event}")
 
     def recent(self, n: int = 50) -> list:
-        if not self.path.exists():
-            return []
         try:
+            if not self.path.exists():
+                return []
             with self.path.open("r", encoding="utf-8") as f:
                 lines = f.readlines()[-n:]
             return [json.loads(l) for l in lines if l.strip()]
