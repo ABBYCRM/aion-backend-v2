@@ -1,4 +1,4 @@
-httpx
+python-multipart
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
-httpx
+python-multipart
