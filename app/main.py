@@ -296,3 +296,9 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     audit.record("aion.shutdown", {})
+
+
+
+@app.get("/api/continuity-pack")
+async def continuity_pack() -> dict:
+    return AION_CONTINUITY_PACK
