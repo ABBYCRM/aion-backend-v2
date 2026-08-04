@@ -21,7 +21,7 @@ from .kernel import (
     build_system_prompt,
     resolve_decision,
 )
-from .llm import AllProvidersFailed, probe, stream_chat
+from .llm import AllProvidersFailed, list_models, probe, stream_chat
 from .settings import settings
 
 
@@ -57,6 +57,10 @@ class ChatRequest(BaseModel):
     max_tokens: int = 2048
     stream: bool = True
     metadata: dict = Field(default_factory=dict)
+    # Optional model override — user picks from /api/models/all.
+    # If present, replaces the default chain. Falls back to chain on failure.
+    model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -131,6 +135,25 @@ async def models() -> dict:
         "chain": chain,
         "providers": providers,
         "primary": chain[0] if chain else None,
+    }
+
+
+@app.get("/api/models/all")
+async def models_all() -> dict:
+    """Full picker: every model id from every healthy provider, grouped."""
+    providers = await list_models()
+    # Build a flat list of (provider, model) for the picker UI.
+    flat: List[dict] = []
+    for provider_name, info in providers.items():
+        if not info.get("ok"):
+            continue
+        for mid in info.get("models", []):
+            flat.append({"provider": provider_name, "model": mid})
+    return {
+        "providers": providers,
+        "flat": flat,
+        "chain": settings.model_chain,
+        "primary": settings.model_chain[0] if settings.model_chain else None,
     }
 
 
@@ -214,9 +237,22 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         yield f"data: {json.dumps({'type': 'decision', 'decision': decision.to_dict(), 'request_id': ctx.request_id}, ensure_ascii=False)}\n\n".encode("utf-8")
 
         # 2. Stream from the LLM router
+        # Build the model chain. If the user picked a specific model
+        # in the picker, override the chain with just that one — plus
+        # the rest of the chain as a fallback in case the picked model
+        # is unavailable.
+        if req.model:
+            # User picked something specific. Try it first, then fall
+            # through to the rest of the chain.
+            picked = [req.model]
+            rest = [m for m in settings.model_chain if m != req.model]
+            chain = picked + rest
+        else:
+            chain = list(settings.model_chain)
+
         try:
             async for event_type, payload in stream_chat(
-                model_chain=settings.model_chain,
+                model_chain=chain,
                 messages=model_messages,
                 temperature=req.temperature,
                 max_tokens=req.max_tokens,

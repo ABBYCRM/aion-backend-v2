@@ -220,6 +220,34 @@ async def probe() -> Dict[str, dict]:
     return results
 
 
+async def list_models() -> Dict[str, dict]:
+    """Return ALL model ids for every healthy provider. Cheap call —
+    the SDK caches the response, and `/v1/models` is unauthenticated on
+    most providers (returns 200 for any key)."""
+    results: Dict[str, dict] = {}
+    for provider in _available_providers():
+        c = _client_for(provider)
+        if not c:
+            continue
+        client, base = c
+        try:
+            r = await client.models.list()
+            ids = sorted({m.id for m in getattr(r, "data", [])})
+            results[provider] = {
+                "ok": True,
+                "base": base,
+                "models": ids,
+            }
+        except Exception as e:
+            results[provider] = {
+                "ok": False,
+                "base": base,
+                "error": f"{type(e).__name__}: {e}",
+                "models": [],
+            }
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Streaming chat completion with model-chain failover.
 # ---------------------------------------------------------------------------
