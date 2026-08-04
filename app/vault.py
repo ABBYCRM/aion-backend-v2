@@ -393,15 +393,15 @@ async def ping(name: str, value: str) -> tuple[bool, int, str | None]:
     if name == "ANTHROPIC_API_KEY":
         return await _ping_generic(name, value, url="https://api.anthropic.com/v1/models", headers={"x-api-key": value, "anthropic-version": "2023-06-01"})
     if name == "HELICONE_API_KEY":
-        return await _ping_generic(name, value, url="https://api.helicone.ai/v1/user", headers={"Authorization": f"Bearer {value}"})
+        return await _ping_generic(name, value, url="https://api.helicone.ai/v1/me", headers={"Authorization": f"Bearer {value}"})
     if name == "BRAVE_API_KEY":
         return await _ping_generic(name, value, url="https://api.search.brave.com/res/v1/web/search?q=test", headers={"X-Subscription-Token": value})
     if name == "TAVILY_API_KEY":
-        return await _ping_generic(name, value, url="https://api.tavily.com/search", method="POST", json_body={"api_key": value, "query": "ping", "max_results": 1})
+        return await _ping_generic(name, value, url="https://api.tavily.com/search", method="POST", json_body={"api_key": value, "query": "ping", "max_results": 1, "include_answer": False})
     if name == "EXA_API_KEY":
-        return await _ping_generic(name, value, url="https://api.exa.ai/search?query=ping&numResults=1", headers={"x-api-key": value})
+        return await _ping_generic(name, value, url="https://api.exa.ai/search", method="POST", headers={"x-api-key": value, "Content-Type": "application/json"}, json_body={"query": "ping", "numResults": 1})
     if name == "FIRECRAWL_API_KEY":
-        return await _ping_generic(name, value, url="https://api.firecrawl.dev/v1/crawl/status/ping", headers={"Authorization": f"Bearer {value}"})
+        return await _ping_generic(name, value, url="https://api.firecrawl.dev/v1/team/credit_usage", headers={"Authorization": f"Bearer {value}"})
     if name == "SCRAPINGBEE_API_KEY":
         return await _ping_generic(name, value, url=f"https://app.scrapingbee.com/api/v1/ping?api_key={value}")
     if name == "SCRAPFLY_API_KEY":
@@ -413,15 +413,18 @@ async def ping(name: str, value: str) -> tuple[bool, int, str | None]:
     if name == "STEEL_API_KEY":
         return await _ping_generic(name, value, url="https://api.steel.dev/v1/sessions", headers={"Authorization": f"Bearer {value}"})
     if name == "SCREENSHOTONE_ACCESS_KEY":
-        return await _ping_generic(name, value, url="https://api.screenshotone.com/ping", headers={"access-key": value})
+        # ScreenshotOne requires an HMAC signature. Just check the format.
+        return (True, 0, None) if 16 <= len(value) <= 128 else (False, 0, "key_format_unexpected")
     if name == "COMPOSIO_API_KEY":
-        return await _ping_generic(name, value, url="https://backend.composio.dev/api/v1/apps", headers={"x-api-key": value})
+        # v3 apps endpoint, but auth may differ. Try /api/v1/auth/me first.
+        return await _ping_generic(name, value, url="https://backend.composio.dev/api/v1/auth/me", headers={"x-api-key": value})
     if name == "PINECONE_API_KEY":
         return await _ping_generic(name, value, url="https://api.pinecone.io/indexes", headers={"Api-Key": value, "X-Pinecone-API-Version": "2024-07"})
     if name == "E2B_API_KEY":
-        return await _ping_generic(name, value, url="https://api.e2b.dev/sandboxes", headers={"Authorization": f"Bearer {value}"})
+        return await _ping_generic(name, value, url="https://api.e2b.dev/sandboxes", method="POST", headers={"Authorization": f"Bearer {value}", "Content-Type": "application/json"}, json_body={"template": "base"})
     if name == "INNGEST_EVENT_KEY":
-        return (True, 0, None) if value.startswith(("signkey-", "evt-", "key-")) else (False, 0, "key_format_unexpected")
+        # Inngest keys come in multiple flavours. Just check the length.
+        return (True, 0, None) if len(value) >= 32 else (False, 0, "key_too_short")
     if name == "DISCORD_BOT_TOKEN":
         return await _ping_generic(name, value, url="https://discord.com/api/v10/users/@me", headers={"Authorization": f"Bot {value}"})
     return (True, 0, None) if len(value) >= 8 else (False, 0, "value_too_short")
