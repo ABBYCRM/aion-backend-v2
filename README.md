@@ -1,78 +1,26 @@
-# AION backend
+# AION backend 2.1
 
-FastAPI runtime for AION with authenticated chat, bounded provider failover, owner-scoped notes, Brave web search, and GitHub App integration.
+Authenticated FastAPI runtime for AION chat, bounded web search, allowlisted GitHub App operations, and optional owner-scoped notes.
 
-## Security model
+## Production invariants
 
-- Every `/api/*` route requires `X-AION-Key` or `Authorization: Bearer ...`.
-- Admin routes require a separate key from `AION_ADMIN_KEYS`.
-- GitHub writes additionally require `GITHUB_WRITE_ENABLED=true` and `X-AION-Confirm: yes`.
-- Provider, Brave, and GitHub credentials exist only in deployment secrets.
-- Notes reject values that resemble API keys or private keys.
-- Client messages may only use `user` and `assistant` roles.
-- Request size, message count, completion tokens, concurrency, and rate limits are enforced server-side.
+- `AION_API_KEYS` and distinct `AION_ADMIN_KEYS` are mandatory.
+- `CORS_ORIGINS` must contain exact HTTPS frontend origins.
+- Models are configured as exact provider/model pairs. Set `PRIMARY_PROVIDER` + `PRIMARY_MODEL`; every fallback should be `provider:model` in `FALLBACK_MODELS`.
+- GitHub access is denied unless `GITHUB_ALLOWED_REPOSITORIES` is non-empty.
+- GitHub token fallback is disabled unless `ALLOW_GITHUB_TOKEN_FALLBACK=true`.
+- GitHub writes additionally require an admin key, `GITHUB_WRITE_ENABLED=true`, and `X-AION-Confirm: yes`.
+- Notes are excluded from model context by default and only matching notes are included after explicit client opt-in.
+- App Platform files are ephemeral. In production, notes are disabled unless a PostgreSQL `DATABASE_URL` is configured. Audit events always go to structured stdout and are also persisted when PostgreSQL is configured.
 
-## Local start
+## Local development
 
 ```bash
 cp .env.example .env
-set -a; . ./.env; set +a
 pip install -r requirements-dev.txt
-uvicorn app.main:app --reload --port 8080
+ENVIRONMENT=development ALLOW_UNAUTHENTICATED_DEV=true uvicorn app.main:app --reload
 ```
 
-For unauthenticated local development only, set:
+## DigitalOcean
 
-```bash
-ENVIRONMENT=development
-ALLOW_UNAUTHENTICATED_DEV=true
-```
-
-Production startup fails when `AION_API_KEYS` or `AION_ADMIN_KEYS` is absent.
-
-## Web search
-
-Set `BRAVE_API_KEY`. The client can enable search on a chat turn or send:
-
-```text
-/search current FastAPI security guidance
-```
-
-Search results are inserted as untrusted tool data with numbered source markers. The model is instructed to cite those markers.
-
-## GitHub
-
-A GitHub App is the preferred credential:
-
-```text
-GITHUB_APP_ID
-GITHUB_INSTALLATION_ID
-GITHUB_PRIVATE_KEY
-GITHUB_ALLOWED_REPOSITORIES=ABBYCRM/aion-frontend,ABBYCRM/aion-backend-v2
-```
-
-Read commands supported in chat:
-
-```text
-/github ABBYCRM/aion-frontend repo
-/github ABBYCRM/aion-frontend issues
-/github ABBYCRM/aion-frontend file app.js
-/github ABBYCRM/aion-backend-v2 search resolve_model_chain
-```
-
-The REST endpoints also support repository metadata, file reads, issue listing, and code search. Admin-confirmed write endpoints can create issues, branches, files, and draft pull requests when writes are explicitly enabled.
-
-## Deployment
-
-`.do/app.yaml` is the single checked-in deployment specification. Configure all secrets and the exact frontend origin in the DigitalOcean control panel:
-
-```text
-AION_API_KEYS
-AION_ADMIN_KEYS
-CORS_ORIGINS
-OPENROUTER_API_KEY or another provider key
-BRAVE_API_KEY
-GitHub App credentials
-```
-
-Do not add these values to the repository, notes database, frontend, or chat context.
+The repository `.do/app.yaml` deploys the API from `main`. Attach a PostgreSQL component or managed database and bind its connection string to `DATABASE_URL` for durable notes and audit history. Do not put secrets in Git, notes, chat, or frontend storage.
