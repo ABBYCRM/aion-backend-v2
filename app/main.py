@@ -221,6 +221,36 @@ async def scratchpad_search(q: str, reveal: bool = False) -> dict:
     return {"items": items, "count": len(items), "q": q}
 
 
+@app.get("/api/scratchpad/verify")
+async def scratchpad_verify_all() -> dict:
+    """Re-verify the kernel signature on every entry. Returns a summary."""
+    return scratchpad.verify_all()
+
+
+@app.get("/api/scratchpad/continuity-context")
+async def scratchpad_continuity_context(
+    q: Optional[str] = None,
+    limit: int = 6,
+    kind: Optional[str] = None,
+) -> dict:
+    """Return a formatted text block the LLM can consume as scratchpad context.
+    Used by the chat to inject recent/relevant operator memory into the system
+    prompt under the 7-law kernel."""
+    block = scratchpad.continuity_context(query=q or "", limit=limit, kinds=[kind] if kind else None)
+    return {"context": block, "length": len(block)}
+
+
+@app.get("/api/scratchpad/lawset")
+async def scratchpad_lawset() -> dict:
+    """Return the embedded lawset version + 7 law names so the operator can
+    verify which kernel signed an entry."""
+    from .scratchpad import LAWSET_VERSION, LAW_NAMES
+    return {
+        "lawset_version": LAWSET_VERSION,
+        "laws": LAW_NAMES,
+    }
+
+
 @app.get("/api/scratchpad/{entry_id}")
 async def scratchpad_get(entry_id: str, reveal: bool = False) -> dict:
     e = scratchpad.get(entry_id, reveal=reveal)
@@ -288,36 +318,6 @@ async def scratchpad_detect(body: ScratchpadDetect) -> dict:
     The full plaintext is returned in `value` so the client can offer to save."""
     candidates = scratchpad.detect_in_text(body.text)
     return {"candidates": candidates, "count": len(candidates)}
-
-
-@app.get("/api/scratchpad/verify")
-async def scratchpad_verify_all() -> dict:
-    """Re-verify the kernel signature on every entry. Returns a summary."""
-    return scratchpad.verify_all()
-
-
-@app.get("/api/scratchpad/continuity-context")
-async def scratchpad_continuity_context(
-    q: Optional[str] = None,
-    limit: int = 6,
-    kind: Optional[str] = None,
-) -> dict:
-    """Return a formatted text block the LLM can consume as scratchpad context.
-    Used by the chat to inject recent/relevant operator memory into the system
-    prompt under the 7-law kernel."""
-    block = scratchpad.continuity_context(query=q or "", limit=limit, kinds=[kind] if kind else None)
-    return {"context": block, "length": len(block)}
-
-
-@app.get("/api/scratchpad/lawset")
-async def scratchpad_lawset() -> dict:
-    """Return the embedded lawset version + 7 law names so the operator can
-    verify which kernel signed an entry."""
-    from .scratchpad import LAWSET_VERSION, LAW_NAMES
-    return {
-        "lawset_version": LAWSET_VERSION,
-        "laws": LAW_NAMES,
-    }
 
 
 @app.post("/api/decision")
