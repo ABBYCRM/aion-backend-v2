@@ -209,7 +209,190 @@ async def github_create_pull(body: GitHubPullWrite, principal: Principal = Depen
 async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
     text = str(body.get("text") or "").strip()
     if not text: raise HTTPException(status_code=400, detail="text_required")
-    return {"ok": True, "mode": "client", "text": text[:settings.max_message_chars]}
+    voice = str(body.get("voice") or "alloy").strip() or "alloy"
+    fmt = str(body.get("format") or "mp3").strip() or "mp3"
+    text = text[:settings.max_message_chars]
+    if not settings.openai_api_key: return {"ok": True, "mode": "client", "text": text, "voice": voice, "format": fmt}
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
+        response = await client.audio.speech.create(model="gpt-4o-mini-tts", voice=voice, input=text, response_format=fmt)
+        audio_bytes = response.read()
+        import base64
+        return {"ok": True, "mode": "server", "text": text, "voice": voice, "format": fmt, "audio_b64": base64.b64encode(audio_bytes).decode("ascii"), "size_bytes": len(audio_bytes)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"tts_failed: {exc}") from exc
+
+
+class ImageGenBody(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    model: str = Field(default="gpt-image-1", max_length=80)
+    size: str = Field(default="1024x1024", max_length=20)
+    n: int = Field(default=1, ge=1, le=4)
+
+
+@app.post("/api/image/generate")
+async def image_generate(body: ImageGenBody, principal: Principal = Depends(authenticated)):
+    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    audit.record("image.generate.started", {"subject": principal.subject, "model": body.model, "size": body.size, "n": body.n, "prompt_hash": _hash_text(body.prompt)})
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
+        kwargs: dict[str, Any] = {"model": body.model, "prompt": body.prompt, "n": body.n}
+        if body.model.startswith("dall-e"): kwargs["size"] = body.size
+        else: kwargs["size"] = body.size
+        response = await client.images.generate(**kwargs)
+        import base64
+        items: list[dict[str, Any]] = []
+        for item in (response.data or []):
+            record: dict[str, Any] = {"revised_prompt": getattr(item, "revised_prompt", None)}
+            b64 = getattr(item, "b64_json", None)
+            url = getattr(item, "url", None)
+            if b64: record["b64_json"] = b64
+            if url: record["url"] = url
+            items.append(record)
+        audit.record("image.generate.succeeded", {"subject": principal.subject, "model": body.model, "count": len(items)})
+        return {"ok": True, "model": body.model, "items": items, "count": len(items)}
+    except Exception as exc:
+        audit.record("image.generate.failed", {"subject": principal.subject, "model": body.model, "error": str(exc)[:200]})
+        raise HTTPException(status_code=502, detail=f"image_generate_failed: {exc}") from exc
+
+
+class VideoGenBody(BaseModel):
+    prompt: str = Field(min_length=1, max_length=4000)
+    model: str = Field(default="sora-2", max_length=80)
+    seconds: int = Field(default=4, ge=2, le=20)
+    size: str = Field(default="1280x720", max_length=20)
+    input_reference: str | None = Field(default=None, max_length=2_000_000)
+    poll: bool = Field(default=False)
+    poll_timeout_seconds: int = Field(default=120, ge=5, le=600)
+
+
+def _parse_size(value: str) -> tuple[int, int]:
+    try:
+        w_str, h_str = value.lower().split("x", 1)
+        return int(w_str), int(h_str)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid_size_format:{value}") from exc
+
+
+@app.post("/api/video/generate")
+async def video_generate(body: VideoGenBody, principal: Principal = Depends(authenticated)):
+    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    audit.record("video.generate.started", {"subject": principal.subject, "model": body.model, "size": body.size, "seconds": body.seconds, "poll": body.poll, "prompt_hash": _hash_text(body.prompt)})
+    width, height = _parse_size(body.size)
+    import httpx
+    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+    timeout = max(30, body.poll_timeout_seconds + 30)
+    async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=timeout, follow_redirects=False) as client:
+        # Create the job
+        create_headers = dict(headers)
+        if body.input_reference:
+            create_headers.pop("Content-Type", None)
+            files: dict[str, Any] = {"input_reference": ("first_frame.png", _decode_data_url(body.input_reference), "image/png")}
+            data: dict[str, Any] = {"model": body.model, "prompt": body.prompt, "seconds": str(body.seconds), "size": body.size}
+            create_resp = await client.post("/videos", headers=create_headers, files=files, data=data)
+        else:
+            create_headers["Content-Type"] = "application/json"
+            create_body = {"model": body.model, "prompt": body.prompt, "seconds": str(body.seconds), "size": body.size}
+            create_resp = await client.post("/videos", headers=create_headers, json=create_body)
+        if create_resp.status_code >= 400:
+            detail = _extract_error(create_resp)
+            if create_resp.status_code in (400, 403, 404) and ("model" in detail.lower() or "permission" in detail.lower() or "not found" in detail.lower()):
+                audit.record("video.generate.fallback", {"subject": principal.subject, "model": body.model, "reason": detail[:120]})
+                return {"ok": False, "fallback": "image_to_video", "reason": "sora_unavailable", "message": detail, "model": body.model}
+            audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "status": create_resp.status_code, "error": detail[:200]})
+            raise HTTPException(status_code=create_resp.status_code, detail=f"video_create_failed: {detail}")
+        job = create_resp.json()
+        video_id = job.get("id")
+        status = job.get("status", "queued")
+        if not body.poll or status in ("completed", "failed"):
+            audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "status": status, "polled": False})
+            return {"ok": True, "model": body.model, "video_id": video_id, "status": status, "size": body.size, "seconds": body.seconds, "progress": job.get("progress"), "raw": job}
+        # Poll until done
+        import asyncio
+        deadline = asyncio.get_event_loop().time() + body.poll_timeout_seconds
+        last_job = job
+        while True:
+            if asyncio.get_event_loop().time() > deadline:
+                audit.record("video.generate.timeout", {"subject": principal.subject, "model": body.model, "video_id": video_id})
+                return {"ok": True, "model": body.model, "video_id": video_id, "status": last_job.get("status"), "progress": last_job.get("progress"), "timed_out": True, "message": "Job still running. Poll GET /api/video/{video_id} for status."}
+            await asyncio.sleep(5)
+            get_resp = await client.get(f"/videos/{video_id}", headers=headers)
+            if get_resp.status_code >= 400:
+                audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "error": _extract_error(get_resp)[:200]})
+                raise HTTPException(status_code=get_resp.status_code, detail=f"video_status_failed: {_extract_error(get_resp)}")
+            last_job = get_resp.json()
+            if last_job.get("status") in ("completed", "failed", "cancelled"):
+                break
+        if last_job.get("status") != "completed":
+            audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "status": last_job.get("status")})
+            return {"ok": False, "model": body.model, "video_id": video_id, "status": last_job.get("status"), "error": last_job.get("error"), "raw": last_job}
+        # Download the MP4
+        content_resp = await client.get(f"/videos/{video_id}/content", headers=headers)
+        if content_resp.status_code >= 400:
+            audit.record("video.generate.failed", {"subject": principal.subject, "model": body.model, "video_id": video_id, "stage": "download", "error": _extract_error(content_resp)[:200]})
+            raise HTTPException(status_code=content_resp.status_code, detail=f"video_download_failed: {_extract_error(content_resp)}")
+        import base64
+        mp4_bytes = content_resp.content
+        audit.record("video.generate.succeeded", {"subject": principal.subject, "model": body.model, "video_id": video_id, "size_bytes": len(mp4_bytes), "polled": True})
+        return {"ok": True, "model": body.model, "video_id": video_id, "status": "completed", "size": body.size, "seconds": body.seconds, "mp4_b64": base64.b64encode(mp4_bytes).decode("ascii"), "size_bytes": len(mp4_bytes), "raw": {k: v for k, v in last_job.items() if k != "content"}}
+
+
+@app.get("/api/video/{video_id}")
+async def video_status(video_id: str, _: Principal = Depends(authenticated)):
+    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    import httpx
+    async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=30, follow_redirects=False) as client:
+        resp = await client.get(f"/videos/{video_id}", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
+        if resp.status_code >= 400: raise HTTPException(status_code=resp.status_code, detail=_extract_error(resp))
+        return resp.json()
+
+
+@app.get("/api/video/{video_id}/content")
+async def video_content(video_id: str, _: Principal = Depends(authenticated)):
+    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    import httpx
+    async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=120, follow_redirects=False) as client:
+        resp = await client.get(f"/videos/{video_id}/content", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
+        if resp.status_code >= 400: raise HTTPException(status_code=resp.status_code, detail=_extract_error(resp))
+        import base64
+        return {"ok": True, "video_id": video_id, "mp4_b64": base64.b64encode(resp.content).decode("ascii"), "size_bytes": len(resp.content)}
+
+
+def _extract_error(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            if "error" in data:
+                err = data["error"]
+                if isinstance(err, dict): return err.get("message") or str(err)
+                return str(err)
+            return data.get("message") or data.get("detail") or str(data)[:300]
+        return str(data)[:300]
+    except Exception: return response.text[:300] or f"http_{response.status_code}"
+
+
+def _decode_data_url(value: str) -> bytes:
+    import base64, binascii, re
+    match = re.match(r"^data:image/(?P<kind>png|jpeg|webp|gif);base64,(?P<data>.*)$", value, re.I | re.S)
+    if not match: raise HTTPException(status_code=400, detail="input_reference_must_be_data_image_url")
+    try: return base64.b64decode(match.group("data"), validate=False)
+    except binascii.Error as exc: raise HTTPException(status_code=400, detail="input_reference_base64_invalid") from exc
+
+
+def _safe_json(obj: Any) -> Any:
+    try:
+        if hasattr(obj, "model_dump"): return obj.model_dump()
+        if hasattr(obj, "to_dict"): return obj.to_dict()
+        if hasattr(obj, "__dict__"): return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+        return obj
+    except Exception: return None
+
+
+def _hash_text(value: str) -> str:
+    import hashlib
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
 
 @app.post("/api/chat")
 async def chat(body: ChatRequest, principal: Principal = Depends(authenticated)):
