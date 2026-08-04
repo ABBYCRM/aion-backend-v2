@@ -118,7 +118,7 @@ app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"], max_age=600)
 
 @app.exception_handler(ToolConfigurationError)
-async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=503, content={"detail": str(exc)})
+async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "tool_not_configured"})
 @app.exception_handler(ToolRequestError)
 async def tool_request(_: Request, exc: ToolRequestError): return JSONResponse(status_code=400, content={"detail": str(exc)})
 
@@ -143,6 +143,10 @@ async def models_all(_: Principal = Depends(authenticated)):
     return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
 @app.get("/api/audit/recent")
 async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
+
+@app.get("/api/notes/status")
+async def notes_status(_: Principal = Depends(authenticated)):
+    return notes.status()
 
 @app.get("/api/notes")
 async def list_notes(q: str = Query(default="", max_length=200), limit: int = Query(default=50, ge=1, le=100), principal: Principal = Depends(authenticated)):
@@ -179,19 +183,19 @@ async def _github_ready() -> None:
 
 @app.post("/api/github/repository")
 async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
-    _github_ready()
+    await _github_ready()
     return await github.get_repository(body.repository)
 @app.post("/api/github/file")
 async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)):
-    _github_ready()
+    await _github_ready()
     return await github.get_file(body.repository, body.path, body.ref)
 @app.post("/api/github/issues")
 async def github_issues(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
-    _github_ready()
+    await _github_ready()
     items = await github.list_issues(body.repository); return {"items": items, "count": len(items)}
 @app.post("/api/github/search")
 async def github_search(body: GitHubSearchBody, _: Principal = Depends(authenticated)):
-    _github_ready()
+    await _github_ready()
     items = await github.search_code(body.repository, body.query, limit=body.limit); return {"items": items, "count": len(items)}
 @app.post("/api/github/issues/create")
 async def github_create_issue(body: GitHubIssueWrite, principal: Principal = Depends(confirmed_admin)):
@@ -212,7 +216,7 @@ async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
     voice = str(body.get("voice") or "alloy").strip() or "alloy"
     fmt = str(body.get("format") or "mp3").strip() or "mp3"
     text = text[:settings.max_message_chars]
-    if not settings.openai_api_key: return {"ok": True, "mode": "client", "text": text, "voice": voice, "format": fmt}
+    if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "text": text, "voice": voice, "format": fmt, "mode": "client_fallback"}
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
@@ -233,7 +237,7 @@ class ImageGenBody(BaseModel):
 
 @app.post("/api/image/generate")
 async def image_generate(body: ImageGenBody, principal: Principal = Depends(authenticated)):
-    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "model": body.model}
     audit.record("image.generate.started", {"subject": principal.subject, "model": body.model, "size": body.size, "n": body.n, "prompt_hash": _hash_text(body.prompt)})
     try:
         from openai import AsyncOpenAI
@@ -278,7 +282,7 @@ def _parse_size(value: str) -> tuple[int, int]:
 
 @app.post("/api/video/generate")
 async def video_generate(body: VideoGenBody, principal: Principal = Depends(authenticated)):
-    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "model": body.model}
     audit.record("video.generate.started", {"subject": principal.subject, "model": body.model, "size": body.size, "seconds": body.seconds, "poll": body.poll, "prompt_hash": _hash_text(body.prompt)})
     width, height = _parse_size(body.size)
     import httpx
@@ -341,7 +345,7 @@ async def video_generate(body: VideoGenBody, principal: Principal = Depends(auth
 
 @app.get("/api/video/{video_id}")
 async def video_status(video_id: str, _: Principal = Depends(authenticated)):
-    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "video_id": video_id}
     import httpx
     async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=30, follow_redirects=False) as client:
         resp = await client.get(f"/videos/{video_id}", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
@@ -351,7 +355,7 @@ async def video_status(video_id: str, _: Principal = Depends(authenticated)):
 
 @app.get("/api/video/{video_id}/content")
 async def video_content(video_id: str, _: Principal = Depends(authenticated)):
-    if not settings.openai_api_key: raise HTTPException(status_code=503, detail="openai_not_configured")
+    if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "video_id": video_id}
     import httpx
     async with httpx.AsyncClient(base_url=settings.openai_base_url.rstrip("/"), timeout=120, follow_redirects=False) as client:
         resp = await client.get(f"/videos/{video_id}/content", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
@@ -421,7 +425,7 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     model_messages = [model_messages[0], *model_messages[1:][-(settings.max_context_messages - 1):]]
     try: model_chain = await resolve_model_chain(body.provider, body.model)
     except InvalidModelSelection as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except AllProvidersFailed as exc: raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AllProvidersFailed as exc: return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "all_providers_failed"})
     audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository)})
     async def events() -> AsyncIterator[bytes]:
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})

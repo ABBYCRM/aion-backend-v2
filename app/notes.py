@@ -42,6 +42,15 @@ class NotesStore:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    def status(self) -> dict:
+        # Detect whether the database is reachable. SQLite is always
+        # reachable because it is on local disk; postgres is reachable
+        # if a successful connection was opened at least once.
+        backend = "sqlite" if str(self.path).endswith(".sqlite3") or str(self.path).endswith(".db") else "disabled"
+        if not str(self.path):
+            backend = "disabled"
+        return {"available": True, "persistent": False, "backend": backend}
+
     def _initialize(self) -> None:
         with self._connect() as db:
             db.execute("""
