@@ -1,513 +1,263 @@
-"""
-AION Runtime — FastAPI server.
-"""
+"""AION FastAPI application."""
 from __future__ import annotations
+
 import asyncio
 import json
+import re
 import time
-from typing import AsyncIterator, List, Optional
+from contextlib import asynccontextmanager
+from typing import Annotated, Any, AsyncIterator, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .audit import audit
-from .scratchpad import scratchpad, SECRET_KINDS
-from .kernel import (
-    AION_CONTINUITY_PACK,
-    DecisionState,
-    MissionContext,
-    build_system_prompt,
-    resolve_decision,
-)
-from .llm import AllProvidersFailed, list_models, probe, stream_chat
+from .auth import Principal, require_admin, require_principal
+from .kernel import AION_CONTINUITY_PACK, MissionContext, build_system_prompt, resolve_decision
+from .llm import AllProvidersFailed, InvalidModelSelection, configured_providers, list_models, probe, resolve_model_chain, stream_chat
+from .notes import SecretLikeValue, notes
+from .rate_limit import enforce_rate_limit, limiter
 from .settings import settings
+from .tools import ToolConfigurationError, ToolRequestError, github, web_search
 
+_GITHUB_URL = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.I)
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title=f"{settings.app_name} Runtime",
-    version=settings.app_version,
-    description="Adaptive Intelligence Operating Nexus — Megalithic Intelligence Lattice",
-)
+class TextPart(BaseModel):
+    type: Literal["text"]
+    text: str = Field(min_length=1, max_length=settings.max_message_chars)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_list,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class ImageURL(BaseModel):
+    url: str = Field(min_length=32, max_length=1_500_000)
+    @field_validator("url")
+    @classmethod
+    def validate_data_image(cls, value: str) -> str:
+        allowed = ("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,", "data:image/gif;base64,")
+        if not value.startswith(allowed): raise ValueError("only_base64_image_data_urls_are_allowed")
+        return value
 
+class ImagePart(BaseModel):
+    type: Literal["image_url"]
+    image_url: ImageURL
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
+ContentPart = Annotated[TextPart | ImagePart, Field(discriminator="type")]
+
 class ChatMessage(BaseModel):
-    role: str = Field(..., pattern="^(system|user|assistant|tool)$")
-    content: str = Field(..., min_length=1, max_length=200_000)
-
+    role: Literal["user", "assistant"]
+    content: str | list[ContentPart]
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value):
+        if isinstance(value, str):
+            if not value.strip() or len(value) > settings.max_message_chars: raise ValueError("invalid_message_content")
+            return value
+        if not value or len(value) > 12: raise ValueError("invalid_content_parts")
+        if sum(len(part.text) for part in value if isinstance(part, TextPart)) > settings.max_message_chars: raise ValueError("message_text_too_large")
+        return value
+    def wire_content(self): return self.content if isinstance(self.content, str) else [part.model_dump() for part in self.content]
+    def text_content(self): return self.content if isinstance(self.content, str) else "\n".join(part.text for part in self.content if isinstance(part, TextPart)).strip()
 
 class ChatRequest(BaseModel):
-    messages: List[ChatMessage] = Field(..., min_length=1, max_length=settings.max_context_messages)
-    temperature: float = 0.7
-    max_tokens: int = 2048
-    stream: bool = True
-    metadata: dict = Field(default_factory=dict)
-    # Optional model override — user picks from /api/models/all.
-    # If present, replaces the default chain. Falls back to chain on failure.
-    model: Optional[str] = None
-    provider: Optional[str] = None
-
-
-class HealthResponse(BaseModel):
-    ok: bool
-    service: str
-    version: str
-    environment: str
-    providers: dict
-    timestamp: str
-    continuity_pack_id: str
-
+    messages: list[ChatMessage] = Field(min_length=1, max_length=settings.max_context_messages)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1024, ge=settings.min_completion_tokens, le=settings.max_completion_tokens)
+    model: str | None = Field(default=None, min_length=1, max_length=300)
+    provider: str | None = Field(default=None, min_length=1, max_length=40)
+    web_search: bool = False
+    github_repository: str | None = Field(default=None, max_length=200)
+    github_path: str | None = Field(default=None, max_length=1000)
+    github_query: str | None = Field(default=None, max_length=200)
+    use_notes: bool = True
+    @model_validator(mode="after")
+    def pair(self):
+        if bool(self.model) != bool(self.provider): raise ValueError("provider_and_model_are_required_together")
+        return self
 
 class DecisionRequest(BaseModel):
-    user_input: str = Field(..., min_length=1, max_length=20_000)
-    history: List[ChatMessage] = Field(default_factory=list)
-    metadata: dict = Field(default_factory=dict)
+    user_input: str = Field(min_length=1, max_length=20000)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=100)
+class NoteBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200); kind: Literal["note", "project", "url", "instruction"] = "note"; value: str = Field(min_length=1, max_length=20000); tags: list[str] = Field(default_factory=list, max_length=20)
+class SearchBody(BaseModel):
+    query: str = Field(min_length=1, max_length=400); count: int = Field(default=6, ge=1, le=20); freshness: Literal["pd", "pw", "pm", "py"] | None = None
+class GitHubRepoBody(BaseModel): repository: str = Field(min_length=3, max_length=200)
+class GitHubFileBody(GitHubRepoBody): path: str = Field(min_length=1, max_length=1000); ref: str | None = Field(default=None, max_length=200)
+class GitHubSearchBody(GitHubRepoBody): query: str = Field(min_length=1, max_length=200); limit: int = Field(default=10, ge=1, le=30)
+class GitHubIssueWrite(GitHubRepoBody): title: str = Field(min_length=1, max_length=256); body: str = Field(default="", max_length=60000)
+class GitHubBranchWrite(GitHubRepoBody): branch: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._/-]+$"); base: str = Field(default="main", min_length=1, max_length=200)
+class GitHubFileWrite(GitHubRepoBody): path: str = Field(min_length=1, max_length=1000); content: str = Field(max_length=500000); message: str = Field(min_length=1, max_length=250); branch: str = Field(min_length=1, max_length=200)
+class GitHubPullWrite(GitHubRepoBody): title: str = Field(min_length=1, max_length=256); body: str = Field(default="", max_length=60000); head: str = Field(min_length=1, max_length=200); base: str = Field(default="main", min_length=1, max_length=200)
 
+class BodyLimitMiddleware:
+    def __init__(self, app: Any, max_bytes: int): self.app = app; self.max_bytes = max_bytes
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http": return await self.app(scope, receive, send)
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}; length = headers.get(b"content-length")
+        if length:
+            try:
+                if int(length) > self.max_bytes: return await JSONResponse(status_code=413, content={"detail": "request_too_large"})(scope, receive, send)
+            except ValueError: pass
+        received = 0
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes: raise HTTPException(status_code=413, detail="request_too_large")
+            return message
+        try: await self.app(scope, limited_receive, send)
+        except HTTPException as exc: await JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})(scope, receive, send)
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    settings.validate_startup(); audit.record("aion.startup", {"version": settings.app_version, "environment": settings.environment}); yield; audit.record("aion.shutdown", {})
+
+app = FastAPI(title=f"{settings.app_name} Runtime", version=settings.app_version, description="Authenticated AION runtime with web and GitHub tools", docs_url=None if settings.environment == "production" else "/docs", redoc_url=None, lifespan=lifespan)
+app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
+app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"], max_age=600)
+
+@app.exception_handler(ToolConfigurationError)
+async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=503, content={"detail": str(exc)})
+@app.exception_handler(ToolRequestError)
+async def tool_request(_: Request, exc: ToolRequestError): return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+async def authenticated(request: Request, principal: Principal = Depends(require_principal)):
+    await enforce_rate_limit(request, principal); return principal
+async def confirmed_admin(principal: Principal = Depends(require_admin), confirmation: str | None = Header(default=None, alias="X-AION-Confirm")):
+    if (confirmation or "").strip().lower() != "yes": raise HTTPException(status_code=409, detail="explicit_confirmation_required")
+    return principal
+
 @app.get("/healthz")
-async def healthz() -> dict:
-    return {
-        "ok": True,
-        "service": settings.app_name,
-        "version": settings.app_version,
-        "environment": settings.environment,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()),
-    }
-
-
+async def healthz(): return {"ok": True, "service": settings.app_name, "version": settings.app_version, "timestamp": int(time.time())}
 @app.get("/readyz")
-async def readyz() -> HealthResponse:
-    providers = await probe()
-    ok = any(p.get("ok") for p in providers.values())
-    if not ok:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "service": settings.app_name,
-                "version": settings.app_version,
-                "environment": settings.environment,
-                "providers": providers,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()),
-                "continuity_pack_id": AION_CONTINUITY_PACK["system_name"],
-                "error": "no_working_provider",
-            },
-        )
-    return HealthResponse(
-        ok=True,
-        service=settings.app_name,
-        version=settings.app_version,
-        environment=settings.environment,
-        providers=providers,
-        timestamp=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()),
-        continuity_pack_id=AION_CONTINUITY_PACK["system_name"],
-    )
-
-
+async def readyz():
+    providers = configured_providers(); return JSONResponse(status_code=200 if providers else 503, content={"ok": bool(providers), "service": settings.app_name, "version": settings.app_version, "configured_provider_count": len(providers)})
 @app.get("/api/continuity-pack")
-async def continuity_pack() -> dict:
-    return AION_CONTINUITY_PACK
-
-
+async def continuity_pack(_: Principal = Depends(authenticated)): return AION_CONTINUITY_PACK
 @app.get("/api/models")
-async def models() -> dict:
-    chain = settings.model_chain
-    providers = await probe()
-    return {
-        "chain": chain,
-        "providers": providers,
-        "primary": chain[0] if chain else None,
-    }
-
-
+async def models(_: Principal = Depends(authenticated)): return {"chain": settings.model_chain, "primary": settings.primary_model, "providers": await probe()}
 @app.get("/api/models/all")
-async def models_all() -> dict:
-    """Full picker: every model id from every healthy provider, grouped."""
-    providers = await list_models()
-    # Build a flat list of (provider, model) for the picker UI.
-    flat: List[dict] = []
-    for provider_name, info in providers.items():
-        if not info.get("ok"):
-            continue
-        for mid in info.get("models", []):
-            flat.append({"provider": provider_name, "model": mid})
-    return {
-        "providers": providers,
-        "flat": flat,
-        "chain": settings.model_chain,
-        "primary": settings.model_chain[0] if settings.model_chain else None,
-    }
-
-
+async def models_all(_: Principal = Depends(authenticated)):
+    providers = await list_models(refresh=False); flat = [{"provider": provider, "model": model} for provider, info in providers.items() if info.get("ok") for model in info.get("models", [])]
+    return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
 @app.get("/api/audit/recent")
-async def audit_recent(n: int = 50) -> dict:
-    return {"events": audit.recent(n)}
+async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
 
-
-# ---------------------------------------------------------------------------
-# Scratchpad — operator-scoped persistent memory.
-# Stores API keys, env snippets, project notes. Secrets are masked in list
-# responses unless ?reveal=true.
-# ---------------------------------------------------------------------------
-class ScratchpadAdd(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
-    value: str = Field(..., min_length=1, max_length=20_000)
-    kind: str = Field(default="note", max_length=40)
-    tags: List[str] = Field(default_factory=list)
-    source: str = Field(default="manual", max_length=60)
-    notes: str = Field(default="", max_length=2000)
-
-
-class ScratchpadUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=200)
-    value: Optional[str] = Field(default=None, max_length=20_000)
-    kind: Optional[str] = Field(default=None, max_length=40)
-    tags: Optional[List[str]] = None
-    source: Optional[str] = Field(default=None, max_length=60)
-    notes: Optional[str] = Field(default=None, max_length=2000)
-
-
-class ScratchpadDetect(BaseModel):
-    text: str = Field(..., min_length=1, max_length=200_000)
-
-
-@app.get("/api/scratchpad/stats")
-async def scratchpad_stats() -> dict:
-    return scratchpad.stats()
-
-
+@app.get("/api/notes")
+async def list_notes(q: str = Query(default="", max_length=200), limit: int = Query(default=50, ge=1, le=100), principal: Principal = Depends(authenticated)):
+    items = notes.list(principal.subject, query=q, limit=limit); return {"items": items, "count": len(items)}
+@app.post("/api/notes")
+async def add_note(body: NoteBody, principal: Principal = Depends(authenticated)):
+    try: item = notes.add(principal.subject, **body.model_dump())
+    except SecretLikeValue as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit.record("notes.add", {"subject": principal.subject, "note_id": item["id"], "kind": item["kind"]}); return item
+@app.put("/api/notes/{note_id}")
+async def update_note(note_id: str, body: NoteBody, principal: Principal = Depends(authenticated)):
+    try: item = notes.update(principal.subject, note_id, **body.model_dump())
+    except SecretLikeValue as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if item is None: raise HTTPException(status_code=404, detail="note_not_found")
+    audit.record("notes.update", {"subject": principal.subject, "note_id": note_id}); return item
+@app.delete("/api/notes/{note_id}")
+async def delete_note(note_id: str, principal: Principal = Depends(authenticated)):
+    if not notes.delete(principal.subject, note_id): raise HTTPException(status_code=404, detail="note_not_found")
+    audit.record("notes.delete", {"subject": principal.subject, "note_id": note_id}); return {"ok": True, "id": note_id}
 @app.get("/api/scratchpad")
-async def scratchpad_list(
-    kind: Optional[str] = None,
-    tag: Optional[str] = None,
-    q: Optional[str] = None,
-    reveal: bool = False,
-    verify: bool = False,
-) -> dict:
-    items = scratchpad.list(kind=kind, tag=tag, q=q, reveal=reveal, verify=verify)
-    if reveal:
-        # Log every reveal of secrets
-        for it in items:
-            if it.get("kind") in SECRET_KINDS and it.get("revealed"):
-                audit.record("scratchpad.reveal", {"id": it["id"], "name": it["name"], "kind": it["kind"]})
-    return {"items": items, "count": len(items)}
-
-
-@app.get("/api/scratchpad/search")
-async def scratchpad_search(q: str, reveal: bool = False) -> dict:
-    items = scratchpad.list(q=q, reveal=reveal)
-    if reveal:
-        for it in items:
-            if it.get("kind") in SECRET_KINDS and it.get("revealed"):
-                audit.record("scratchpad.reveal", {"id": it["id"], "name": it["name"], "kind": it["kind"], "via": "search"})
-    return {"items": items, "count": len(items), "q": q}
-
-
-@app.get("/api/scratchpad/verify")
-async def scratchpad_verify_all() -> dict:
-    """Re-verify the kernel signature on every entry. Returns a summary."""
-    return scratchpad.verify_all()
-
-
-@app.get("/api/scratchpad/continuity-context")
-async def scratchpad_continuity_context(
-    q: Optional[str] = None,
-    limit: int = 6,
-    kind: Optional[str] = None,
-) -> dict:
-    """Return a formatted text block the LLM can consume as scratchpad context.
-    Used by the chat to inject recent/relevant operator memory into the system
-    prompt under the 7-law kernel."""
-    block = scratchpad.continuity_context(query=q or "", limit=limit, kinds=[kind] if kind else None)
-    return {"context": block, "length": len(block)}
-
-
-@app.get("/api/scratchpad/lawset")
-async def scratchpad_lawset() -> dict:
-    """Return the embedded lawset version + 7 law names so the operator can
-    verify which kernel signed an entry."""
-    from .scratchpad import LAWSET_VERSION, LAW_NAMES
-    return {
-        "lawset_version": LAWSET_VERSION,
-        "laws": LAW_NAMES,
-    }
-
-
-@app.get("/api/scratchpad/{entry_id}")
-async def scratchpad_get(entry_id: str, reveal: bool = False, verify: bool = False) -> dict:
-    e = scratchpad.get(entry_id, reveal=reveal, verify=verify)
-    if e is None:
-        raise HTTPException(404, "scratchpad entry not found")
-    if reveal and e.get("kind") in SECRET_KINDS and e.get("revealed"):
-        audit.record("scratchpad.reveal", {"id": e["id"], "name": e["name"], "kind": e["kind"]})
-    return e
-
-
-@app.post("/api/scratchpad")
-async def scratchpad_add(body: ScratchpadAdd) -> dict:
-    e = scratchpad.add(
-        name=body.name,
-        value=body.value,
-        kind=body.kind,
-        tags=body.tags,
-        source=body.source,
-        notes=body.notes,
-    )
-    audit.record("scratchpad.add", {"id": e["id"], "name": e["name"], "kind": e["kind"], "tags": e["tags"]})
-    # Always return masked unless caller passed reveal. Default to masked.
-    view = dict(e)
-    if e["kind"] in SECRET_KINDS:
-        # Mask the value in the create response too — caller already has it.
-        from .scratchpad import _mask
-        view["value"] = _mask(e["value"])
-        view["revealed"] = False
-    return view
-
-
-@app.patch("/api/scratchpad/{entry_id}")
-async def scratchpad_update(entry_id: str, body: ScratchpadUpdate) -> dict:
-    patch = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not patch:
-        raise HTTPException(400, "no fields to update")
-    e = scratchpad.update(entry_id, patch)
-    if e is None:
-        raise HTTPException(404, "scratchpad entry not found")
-    audit.record("scratchpad.update", {"id": e["id"], "fields": list(patch.keys())})
-    return e
-
-
-@app.delete("/api/scratchpad/{entry_id}")
-async def scratchpad_delete(entry_id: str) -> dict:
-    ok = scratchpad.delete(entry_id)
-    if not ok:
-        raise HTTPException(404, "scratchpad entry not found")
-    audit.record("scratchpad.delete", {"id": entry_id})
-    return {"ok": True, "id": entry_id}
-
-
-@app.post("/api/scratchpad/{entry_id}/use")
-async def scratchpad_use(entry_id: str) -> dict:
-    e = scratchpad.use(entry_id)
-    if e is None:
-        raise HTTPException(404, "scratchpad entry not found")
-    audit.record("scratchpad.use", {"id": e["id"], "use_count": e["use_count"]})
-    return e
-
-
-@app.post("/api/scratchpad/detect")
-async def scratchpad_detect(body: ScratchpadDetect) -> dict:
-    """Scan arbitrary text for likely API keys / tokens. Returns masked previews.
-    The full plaintext is returned in `value` so the client can offer to save."""
-    candidates = scratchpad.detect_in_text(body.text)
-    return {"candidates": candidates, "count": len(candidates)}
-
+async def legacy_scratchpad(principal: Principal = Depends(authenticated)):
+    items = notes.list(principal.subject, limit=50); return {"items": items, "count": len(items), "mode": "notes_only"}
 
 @app.post("/api/decision")
-async def decision(req: DecisionRequest) -> dict:
-    ctx = MissionContext(
-        user_input=req.user_input,
-        history=[m.model_dump() for m in req.history],
-        metadata=req.metadata,
-    )
-    dec = resolve_decision(ctx)
-    audit.record("kernel.decision", {
-        "request_id": ctx.request_id,
-        "state": dec.state.value,
-        "score": dec.score,
-        "fingerprint": ctx.fingerprint(),
-    })
-    return {
-        "request_id": ctx.request_id,
-        "decision": dec.to_dict(),
-        "system_prompt": build_system_prompt(dec),
-    }
-
+async def decision(body: DecisionRequest, principal: Principal = Depends(authenticated)):
+    context = MissionContext(user_input=body.user_input, history=[{"role": message.role, "content": message.text_content()} for message in body.history]); result = resolve_decision(context)
+    audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value}); return {"request_id": context.request_id, "decision": result.to_dict()}
+@app.post("/api/search")
+async def search(body: SearchBody, _: Principal = Depends(authenticated)):
+    results = await web_search.search(body.query, count=body.count, freshness=body.freshness); return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
+@app.post("/api/github/repository")
+async def github_repository(body: GitHubRepoBody, _: Principal = Depends(authenticated)): return await github.get_repository(body.repository)
+@app.post("/api/github/file")
+async def github_file(body: GitHubFileBody, _: Principal = Depends(authenticated)): return await github.get_file(body.repository, body.path, body.ref)
+@app.post("/api/github/issues")
+async def github_issues(body: GitHubRepoBody, _: Principal = Depends(authenticated)):
+    items = await github.list_issues(body.repository); return {"items": items, "count": len(items)}
+@app.post("/api/github/search")
+async def github_search(body: GitHubSearchBody, _: Principal = Depends(authenticated)):
+    items = await github.search_code(body.repository, body.query, limit=body.limit); return {"items": items, "count": len(items)}
+@app.post("/api/github/issues/create")
+async def github_create_issue(body: GitHubIssueWrite, principal: Principal = Depends(confirmed_admin)):
+    result = await github.create_issue(body.repository, body.title, body.body); audit.record("github.issue_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]}); return result
+@app.post("/api/github/branches/create")
+async def github_create_branch(body: GitHubBranchWrite, principal: Principal = Depends(confirmed_admin)):
+    result = await github.create_branch(body.repository, body.branch, body.base); audit.record("github.branch_created", {"subject": principal.subject, "repository": body.repository, "branch": body.branch}); return result
+@app.post("/api/github/files/upsert")
+async def github_upsert_file(body: GitHubFileWrite, principal: Principal = Depends(confirmed_admin)):
+    result = await github.upsert_file(body.repository, body.path, body.content, body.message, body.branch); audit.record("github.file_upserted", {"subject": principal.subject, "repository": body.repository, "path": body.path}); return result
+@app.post("/api/github/pulls/create")
+async def github_create_pull(body: GitHubPullWrite, principal: Principal = Depends(confirmed_admin)):
+    result = await github.create_pull_request(body.repository, body.title, body.body, body.head, body.base); audit.record("github.pull_created", {"subject": principal.subject, "repository": body.repository, "number": result["number"]}); return result
+@app.post("/api/tts")
+async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
+    text = str(body.get("text") or "").strip()
+    if not text: raise HTTPException(status_code=400, detail="text_required")
+    return {"ok": True, "mode": "client", "text": text[:settings.max_message_chars]}
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest) -> StreamingResponse:
-    """Server-Sent Events streaming chat endpoint."""
-    if not req.messages:
-        raise HTTPException(400, "messages must be non-empty")
-
-    last_user = next((m for m in reversed(req.messages) if m.role == "user"), None)
-    if not last_user:
-        raise HTTPException(400, "at least one user message is required")
-
-    # Run the kernel on the latest user turn
-    ctx = MissionContext(
-        user_input=last_user.content,
-        history=[m.model_dump() for m in req.messages[:-1]],
-        metadata=req.metadata,
-    )
-    decision = resolve_decision(ctx)
-
-    audit.record("kernel.pre_chat", {
-        "request_id": ctx.request_id,
-        "state": decision.state.value,
-        "score": decision.score,
-        "fingerprint": ctx.fingerprint(),
-    })
-
-    # Build the message stack sent to the model
-    system_prompt = build_system_prompt(decision)
-    # Inject the operator's scratchpad as continuity context. This is how
-    # the LLM "remembers" API keys, env vars, and project notes across
-    # sessions without the operator having to paste them in every chat.
-    sp_ctx = scratchpad.continuity_context(
-        query=last_user.content,
-        limit=6,
-    )
-    if sp_ctx:
-        system_prompt = system_prompt + "\n\n" + sp_ctx
-    model_messages = [{"role": "system", "content": system_prompt}]
-    model_messages.extend([m.model_dump() for m in req.messages])
-    # Truncate to max_context_messages
-    if len(model_messages) > settings.max_context_messages:
-        # always keep system, drop oldest in the middle
-        sys_msg = model_messages[0]
-        rest = model_messages[1:]
-        rest = rest[-(settings.max_context_messages - 1):]
-        model_messages = [sys_msg] + rest
-
-    if decision.state == DecisionState.REJECT:
-        async def reject_stream() -> AsyncIterator[bytes]:
-            payload = {
-                "type": "rejected",
-                "request_id": ctx.request_id,
-                "decision": decision.to_dict(),
-                "message": "The kernel rejected this turn. Adjust your request and try again.",
-            }
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-            yield b"data: [DONE]\n\n"
-        return StreamingResponse(reject_stream(), media_type="text/event-stream")
-
-    async def event_stream() -> AsyncIterator[bytes]:
-        # 1. Send the decision so the client can show it
-        yield f"data: {json.dumps({'type': 'decision', 'decision': decision.to_dict(), 'request_id': ctx.request_id}, ensure_ascii=False)}\n\n".encode("utf-8")
-
-        # 2. Stream from the LLM router
-        # Build the model chain. If the user picked a specific model
-        # in the picker, override the chain with just that one — plus
-        # the rest of the chain as a fallback in case the picked model
-        # is unavailable.
-        if req.model:
-            # User picked something specific. Try it first, then fall
-            # through to the rest of the chain.
-            picked = [req.model]
-            rest = [m for m in settings.model_chain if m != req.model]
-            chain = picked + rest
-        else:
-            chain = list(settings.model_chain)
-
+async def chat(body: ChatRequest, principal: Principal = Depends(authenticated)):
+    last_user = next((message for message in reversed(body.messages) if message.role == "user"), None)
+    if last_user is None: raise HTTPException(status_code=400, detail="user_message_required")
+    user_text = last_user.text_content(); tool_contexts = []; tool_events = []; tool_errors = []
+    search_query = _search_query(body.web_search, user_text)
+    if search_query:
         try:
-            async for event_type, payload in stream_chat(
-                model_chain=chain,
-                messages=model_messages,
-                temperature=req.temperature,
-                max_tokens=req.max_tokens,
-                request_id=ctx.request_id,
-            ):
-                msg = {"type": event_type, **payload}
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n".encode("utf-8")
-                await asyncio.sleep(0)  # cooperative yield
-        except AllProvidersFailed as e:
-            err = {"type": "error", "kind": "all_providers_failed", "message": str(e)}
-            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode("utf-8")
-            audit.record("llm.all_failed", {"request_id": ctx.request_id, "error": str(e)})
-
+            results = await web_search.search(search_query); context = web_search.as_context(results)
+            if context: tool_contexts.append(context)
+            tool_events.append({"type": "tool", "tool": "web_search", "query": search_query, "results": [result.__dict__ for result in results]})
+        except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
+    repository, github_mode, github_argument = _github_request(body, user_text)
+    if repository:
+        try:
+            if github_mode == "file" and github_argument: result = await github.get_file(repository, github_argument)
+            elif github_mode == "search" and github_argument: result = await github.search_code(repository, github_argument)
+            elif github_mode == "issues": result = await github.list_issues(repository)
+            else: result = await github.get_repository(repository)
+            tool_contexts.append(github.as_context(github_mode, repository, result)); tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
+        except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
+    mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
+    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "")
+    model_messages = [{"role": "system", "content": system_prompt}, *({"role": message.role, "content": message.wire_content()} for message in body.messages)]
+    model_messages = [model_messages[0], *model_messages[1:][-(settings.max_context_messages - 1):]]
+    try: model_chain = await resolve_model_chain(body.provider, body.model)
+    except InvalidModelSelection as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AllProvidersFailed as exc: raise HTTPException(status_code=503, detail=str(exc)) from exc
+    audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository)})
+    async def events() -> AsyncIterator[bytes]:
+        yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
+        for event in tool_events: yield _sse(event)
+        async with limiter.chat_slot():
+            try:
+                async for event_type, payload in stream_chat(model_chain=model_chain, messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, request_id=mission.request_id):
+                    yield _sse({"type": event_type, **payload}); await asyncio.sleep(0)
+            except AllProvidersFailed as exc:
+                yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
         yield b"data: [DONE]\n\n"
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value})
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "X-AION-Decision": decision.state.value,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# TTS proxy — browser SpeechSynthesis is the primary path; this is a
-# server-side fallback that streams an audio file if a TTS key is configured.
-# We expose the endpoint so the frontend can call it when available.
-# ---------------------------------------------------------------------------
-@app.post("/api/tts")
-async def tts(body: dict) -> JSONResponse:
-    text = (body or {}).get("text", "").strip()
-    if not text:
-        raise HTTPException(400, "text is required")
-    # Server-side TTS is intentionally not implemented in v1.1 —
-    # we use the browser's Web Speech API on the client (zero key, zero cost).
-    return JSONResponse({
-        "ok": True,
-        "mode": "client",
-        "text": text,
-        "note": "Client-side Web Speech API is used. No server TTS key required.",
-    })
-
-
-# ---------------------------------------------------------------------------
-# Static frontend mount (served from same origin in production)
-# ---------------------------------------------------------------------------
-import os as _os
-_STATIC_DIR = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "static")
-if _os.path.isdir(_STATIC_DIR):
-    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
-
-
-# ---------------------------------------------------------------------------
-# Startup probe
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def on_startup() -> None:
-    # Seed the scratchpad from AION_SCRATCHPAD_SEED if the env var is set.
-    # This lets the operator pin baseline entries (API keys, project URLs)
-    # in the runtime spec so they survive container redeploys.
-    try:
-        from .scratchpad import _seed_from_env
-        _seed_from_env()
-    except Exception as _e:
-        print(f"[AION] scratchpad seed failed: {_e}")
-    audit.record("aion.startup", {"version": settings.app_version, "env": settings.environment})
-    # Run the live provider probe in the background with a hard timeout so
-    # it never blocks startup. If a provider is slow/unreachable, the server
-    # still comes up and serves /healthz; the probe result lands in the audit log.
-    async def _bg_probe() -> None:
-        try:
-            providers = await asyncio.wait_for(probe(), timeout=20.0)
-            audit.record("aion.providers_probe", providers)
-            for p, info in providers.items():
-                print(f"[AION] provider={p} ok={info.get('ok')} models={info.get('model_count', '?')}")
-        except asyncio.TimeoutError:
-            print("[AION] startup probe timed out after 20s")
-            audit.record("aion.providers_probe_failed", {"error": "timeout"})
-        except Exception as e:
-            print(f"[AION] startup probe failed: {e}")
-            audit.record("aion.providers_probe_failed", {"error": str(e)})
-    asyncio.create_task(_bg_probe())
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    audit.record("aion.shutdown", {})
+def _sse(payload): return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+def _search_query(enabled, text):
+    stripped = text.strip(); return stripped[8:].strip()[:400] if stripped.lower().startswith("/search ") else stripped[:400] if enabled else ""
+def _github_request(body, text):
+    repository = body.github_repository or ""; mode = "repository"; argument = ""; stripped = text.strip()
+    if stripped.lower().startswith("/github "):
+        command = stripped[8:].strip().split(maxsplit=2)
+        if command: repository = command[0]
+        if len(command) >= 2:
+            action = command[1].lower()
+            if action in {"issues", "repo", "repository"}: mode = "issues" if action == "issues" else "repository"
+            elif action == "file" and len(command) == 3: mode, argument = "file", command[2]
+            elif action == "search" and len(command) == 3: mode, argument = "search", command[2]
+    elif body.github_path: mode, argument = "file", body.github_path
+    elif body.github_query: mode, argument = "search", body.github_query
+    elif not repository:
+        match = _GITHUB_URL.search(text)
+        if match: repository = match.group(0)
+    return repository, mode, argument

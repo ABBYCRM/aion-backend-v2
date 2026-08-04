@@ -1,399 +1,168 @@
-"""
-AION LLM Router — provider-agnostic with live failover.
-
-Priority order:
-  1. OpenRouter (gives access to Kimi, Grok, Qwen, DeepSeek, Claude, Gemini)
-  2. Moonshot direct (api.moonshot.ai/v1) if key present
-  3. OpenAI direct (api.openai.com/v1) if key present
-
-Each call:
-  - picks the first healthy model in the chain
-  - streams tokens via OpenAI-compatible SDK
-  - on 401/403/429/5xx tries the next model
-  - records every attempt to the audit log
-"""
+"""Provider-aware LLM routing with bounded, non-corrupting failover."""
 from __future__ import annotations
+
+import asyncio
 import time
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI
-from openai import (
-    APIConnectionError,
-    AuthenticationError,
-    RateLimitError,
-    BadRequestError,
-    APIStatusError,
-)
+try:
+    from openai import AsyncOpenAI
+    from openai import APIConnectionError, APIStatusError, AuthenticationError, BadRequestError, RateLimitError
+except ImportError:
+    AsyncOpenAI = None
+    class _OpenAIUnavailableError(Exception): pass
+    APIConnectionError = APIStatusError = AuthenticationError = BadRequestError = RateLimitError = _OpenAIUnavailableError
 
 from .audit import audit
 from .settings import settings
 
 
-# ---------------------------------------------------------------------------
-# Key pool — round-robin across comma-separated keys.
-# Used for providers with tight rate limits (NVIDIA NIM, Bitdeer).
-# ---------------------------------------------------------------------------
-_pool_state: Dict[str, dict] = {}
+class AllProvidersFailed(RuntimeError): pass
+class InvalidModelSelection(ValueError): pass
+class ProviderUnavailable(RuntimeError): pass
 
 
-def _key_pool(provider: str) -> Optional[str]:
-    """Return the next key in round-robin order, or None if not configured."""
-    raw = ""
-    if provider == "nvidia":
-        raw = settings.nvidia_api_key
-    elif provider == "bitdeer":
-        raw = settings.bitdeer_api_key
-    else:
-        # OpenRouter / Moonshot / OpenAI / Cloudflare — single key path
-        return None
-    keys = [k.strip() for k in (raw or "").split(",") if k.strip()]
-    if not keys:
-        return None
-    if provider not in _pool_state:
-        _pool_state[provider] = {"idx": 0}
-    state_ = _pool_state[provider]
-    key = keys[state_["idx"] % len(keys)]
-    state_["idx"] = (state_["idx"] + 1) % len(keys)
-    return key
-
-
-@dataclass
-class LLMAttempt:
+@dataclass(frozen=True)
+class ModelRef:
     provider: str
     model: str
-    base_url: str
-    success: bool
-    error: Optional[str] = None
-    latency_ms: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
 
 
-def _client_for(provider: str) -> Optional[Tuple[AsyncOpenAI, str]]:
-    if provider == "openrouter":
-        if not settings.openrouter_api_key:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=settings.openrouter_api_key,
-                base_url=settings.openrouter_base_url,
-                default_headers={
-                    "HTTP-Referer": settings.openrouter_app_url,
-                    "X-Title": settings.openrouter_app_name,
-                },
-                timeout=settings.request_timeout_seconds,
-            ),
-            settings.openrouter_base_url,
-        )
-    if provider == "moonshot":
-        if not settings.moonshot_api_key:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=settings.moonshot_api_key,
-                base_url=settings.moonshot_base_url,
-                timeout=settings.request_timeout_seconds,
-            ),
-            settings.moonshot_base_url,
-        )
-    if provider == "openai":
-        if not settings.openai_api_key:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                timeout=settings.request_timeout_seconds,
-            ),
-            settings.openai_base_url,
-        )
+_key_indices: dict[str, int] = {}
+_catalog_cache: dict[str, Any] = {"expires": 0.0, "value": {}}
+_catalog_lock = asyncio.Lock()
+
+
+def _pooled_key(provider: str, raw: str) -> str:
+    keys = [key.strip() for key in raw.split(",") if key.strip()]
+    if not keys: return ""
+    index = _key_indices.get(provider, 0) % len(keys); _key_indices[provider] = (index + 1) % len(keys); return keys[index]
+
+
+def configured_providers() -> list[str]:
+    providers = []
+    if settings.openrouter_api_key: providers.append("openrouter")
+    if settings.moonshot_api_key: providers.append("moonshot")
+    if settings.openai_api_key: providers.append("openai")
+    if settings.nvidia_api_key: providers.append("nvidia")
+    if settings.bitdeer_api_key: providers.append("bitdeer")
+    if settings.cloudflare_api_token and settings.cloudflare_url: providers.append("cloudflare")
+    return providers
+
+
+def _client_for(provider: str) -> Any:
+    if AsyncOpenAI is None: raise ProviderUnavailable("openai_sdk_not_installed")
+    if provider == "openrouter" and settings.openrouter_api_key:
+        return AsyncOpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url, timeout=settings.request_timeout_seconds, default_headers={"HTTP-Referer": settings.openrouter_app_url, "X-Title": settings.openrouter_app_name})
+    if provider == "moonshot" and settings.moonshot_api_key:
+        return AsyncOpenAI(api_key=settings.moonshot_api_key, base_url=settings.moonshot_base_url, timeout=settings.request_timeout_seconds)
+    if provider == "openai" and settings.openai_api_key:
+        return AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
     if provider == "nvidia":
-        key = _key_pool("nvidia")
-        if not key:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=key,
-                base_url=settings.nvidia_base_url,
-                timeout=settings.request_timeout_seconds,
-            ),
-            settings.nvidia_base_url,
-        )
+        key = _pooled_key("nvidia", settings.nvidia_api_key)
+        if key: return AsyncOpenAI(api_key=key, base_url=settings.nvidia_base_url, timeout=settings.request_timeout_seconds)
     if provider == "bitdeer":
-        key = _key_pool("bitdeer")
-        if not key:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=key,
-                base_url=settings.bitdeer_base_url,
-                # Bitdeer AI Inference requires a real User-Agent or it
-                # gets 403'd by Cloudflare edge. The SDK doesn't set one
-                # by default; AsyncOpenAI accepts default_headers.
-                default_headers={"User-Agent": "AION-Runtime/1.1"},
-                timeout=settings.request_timeout_seconds,
-            ),
-            settings.bitdeer_base_url,
-        )
-    if provider == "cloudflare":
-        url = settings.cloudflare_url()
-        if not settings.cloudflare_api_token or not url:
-            return None
-        return (
-            AsyncOpenAI(
-                api_key=settings.cloudflare_api_token,
-                base_url=url,
-                timeout=settings.request_timeout_seconds,
-            ),
-            url,
-        )
-    return None
+        key = _pooled_key("bitdeer", settings.bitdeer_api_key)
+        if key: return AsyncOpenAI(api_key=key, base_url=settings.bitdeer_base_url, timeout=settings.request_timeout_seconds, default_headers={"User-Agent": f"AION/{settings.app_version}"})
+    if provider == "cloudflare" and settings.cloudflare_api_token and settings.cloudflare_url:
+        return AsyncOpenAI(api_key=settings.cloudflare_api_token, base_url=settings.cloudflare_url, timeout=settings.request_timeout_seconds)
+    raise ProviderUnavailable(f"provider_not_configured:{provider}")
 
 
-def _provider_for_model(model: str) -> str:
-    """Route a model id to its provider. OpenRouter is the default for
-    cross-vendor model ids; direct providers only handle their own model ids
-    when a key is configured."""
-    # NVIDIA NIM model ids follow `org/model`; the *direct* NVIDIA endpoint
-    # accepts the same ids but needs a real nvapi key.
-    if model.startswith("nvidia/") or model.startswith("meta/") or model.startswith("mistralai/") or model.startswith("google/"):
-        return "nvidia" if settings.nvidia_api_key else "openrouter"
-    # Bitdeer serves DeepSeek/Qwen/Llama; we route those to bitdeer when key present.
-    if settings.bitdeer_api_key and model.startswith("deepseek-"):
-        return "bitdeer"
-    if model.startswith("moonshotai/") or model.startswith("kimi-"):
-        return "moonshot" if settings.moonshot_api_key else "openrouter"
-    if model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3"):
-        return "openai" if settings.openai_api_key else "openrouter"
-    # Cloudflare Workers AI model ids are bare like @cf/meta/llama-3.1-8b-instruct
-    if model.startswith("@cf/"):
-        return "cloudflare" if (settings.cloudflare_api_token and settings.cloudflare_url()) else "openrouter"
+async def list_models(*, refresh: bool = False) -> dict[str, dict[str, Any]]:
+    now = time.monotonic()
+    if not refresh and now < float(_catalog_cache["expires"]): return _catalog_cache["value"]
+    async with _catalog_lock:
+        if not refresh and time.monotonic() < float(_catalog_cache["expires"]): return _catalog_cache["value"]
+        output = {}
+        for provider in configured_providers():
+            started = time.monotonic()
+            try:
+                response = await _client_for(provider).models.list()
+                models = sorted({str(item.id) for item in getattr(response, "data", []) if getattr(item, "id", None)})
+                output[provider] = {"ok": True, "models": models, "model_count": len(models), "latency_ms": int((time.monotonic() - started) * 1000)}
+            except Exception as exc:
+                output[provider] = {"ok": False, "models": [], "model_count": 0, "latency_ms": int((time.monotonic() - started) * 1000), "error": _public_error(exc)}
+        _catalog_cache["value"] = output; _catalog_cache["expires"] = time.monotonic() + 300; return output
+
+
+async def probe() -> dict[str, dict[str, Any]]:
+    catalog = await list_models(refresh=False)
+    return {provider: {"ok": info.get("ok", False), "model_count": info.get("model_count", 0), "latency_ms": info.get("latency_ms", 0), **({"error": info.get("error")} if not info.get("ok") else {})} for provider, info in catalog.items()}
+
+
+def _default_provider(model: str) -> str:
+    if (model.startswith("moonshotai/") or model.startswith("kimi-")) and settings.moonshot_api_key: return "moonshot"
+    if (model.startswith("gpt-") or model.startswith(("o1", "o3", "o4"))) and settings.openai_api_key: return "openai"
+    if model.startswith(("nvidia/", "meta/", "mistralai/", "google/")) and settings.nvidia_api_key: return "nvidia"
+    if model.startswith(("deepseek-", "deepseek/")) and settings.bitdeer_api_key: return "bitdeer"
+    if model.startswith("@cf/") and settings.cloudflare_api_token and settings.cloudflare_url: return "cloudflare"
     return "openrouter"
 
 
-def _available_providers() -> List[str]:
-    out = []
-    if settings.openrouter_api_key:
-        out.append("openrouter")
-    if settings.moonshot_api_key:
-        out.append("moonshot")
-    if settings.openai_api_key:
-        out.append("openai")
-    if settings.nvidia_api_key:
-        out.append("nvidia")
-    if settings.bitdeer_api_key:
-        out.append("bitdeer")
-    if settings.cloudflare_api_token and settings.cloudflare_url():
-        out.append("cloudflare")
-    return out
+async def resolve_model_chain(selected_provider: str | None, selected_model: str | None) -> list[ModelRef]:
+    chain = []
+    if selected_provider or selected_model:
+        if not selected_provider or not selected_model: raise InvalidModelSelection("provider_and_model_are_required_together")
+        if selected_provider not in configured_providers(): raise InvalidModelSelection("selected_provider_not_configured")
+        known = (await list_models(refresh=False)).get(selected_provider, {}).get("models") or []
+        if known and selected_model not in known: raise InvalidModelSelection("selected_model_not_available_for_provider")
+        chain.append(ModelRef(selected_provider, selected_model))
+    for model in settings.model_chain:
+        provider = _default_provider(model)
+        if provider not in configured_providers(): continue
+        candidate = ModelRef(provider, model)
+        if candidate not in chain: chain.append(candidate)
+        if provider != "openrouter" and settings.openrouter_api_key:
+            fallback = ModelRef("openrouter", model)
+            if fallback not in chain: chain.append(fallback)
+    if not chain: raise AllProvidersFailed("no_provider_configured")
+    return chain
 
 
-# ---------------------------------------------------------------------------
-# Health probe — at startup, hit /v1/models to confirm key works.
-# ---------------------------------------------------------------------------
-async def probe() -> Dict[str, dict]:
-    """Return health info for every provider/model we might call."""
-    results: Dict[str, dict] = {}
-    for provider in _available_providers():
-        c = _client_for(provider)
-        if not c:
-            continue
-        client, base = c
-        t0 = time.time()
+async def stream_chat(*, model_chain: list[ModelRef], messages: list[dict[str, Any]], temperature: float, max_tokens: int, request_id: str) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    last_error = "no_attempt"
+    for index, ref in enumerate(model_chain, 1):
+        emitted_output = False; attempt = {"request_id": request_id, "provider": ref.provider, "model": ref.model, "index": index}
+        yield "attempt", {"provider": ref.provider, "model": ref.model, "index": index}; audit.record("llm.attempt_start", attempt); started = time.monotonic()
         try:
-            r = await client.models.list()
-            ids = sorted({m.id for m in getattr(r, "data", [])})
-            results[provider] = {
-                "ok": True,
-                "base": base,
-                "model_count": len(ids),
-                "latency_ms": int((time.time() - t0) * 1000),
-            }
-        except Exception as e:
-            results[provider] = {
-                "ok": False,
-                "base": base,
-                "error": f"{type(e).__name__}: {e}",
-                "latency_ms": int((time.time() - t0) * 1000),
-            }
-    return results
+            stream = await _client_for(ref.provider).chat.completions.create(model=ref.model, messages=messages, temperature=temperature, max_tokens=max_tokens, stream=True)
+            chars = 0; opened = False; finish_reason = None
+            async for chunk in stream:
+                for choice in getattr(chunk, "choices", []) or []:
+                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason; delta = getattr(choice, "delta", None)
+                    if delta is None: continue
+                    content = getattr(delta, "content", None)
+                    if content:
+                        if not opened: yield "open", {"provider": ref.provider, "model": ref.model}; opened = True
+                        emitted_output = True; chars += len(content); yield "delta", {"text": content}
+            latency = int((time.monotonic() - started) * 1000); audit.record("llm.attempt_ok", {**attempt, "latency_ms": latency, "completion_chars": chars})
+            yield "done", {"provider": ref.provider, "model": ref.model, "latency_ms": latency, "completion_chars": chars, "finish_reason": finish_reason}; return
+        except (AuthenticationError, RateLimitError, APIConnectionError, APIStatusError, BadRequestError, ProviderUnavailable) as exc:
+            last_error = _public_error(exc); audit.record("llm.attempt_failed", {**attempt, "error_type": type(exc).__name__, "partial": emitted_output})
+            if emitted_output:
+                yield "error", {"kind": "partial_stream_failure", "provider": ref.provider, "model": ref.model, "message": "The selected provider disconnected after streaming began. The partial response was not mixed with another model."}; return
+            yield "error", {"kind": _error_kind(exc), "provider": ref.provider, "model": ref.model, "message": last_error}; continue
+        except Exception as exc:
+            last_error = "provider_unexpected_error"; audit.record("llm.attempt_unexpected", {**attempt, "error_type": type(exc).__name__, "partial": emitted_output})
+            if emitted_output:
+                yield "error", {"kind": "partial_stream_failure", "provider": ref.provider, "model": ref.model, "message": "The provider failed after streaming began. The partial response was preserved without cross-model concatenation."}; return
+    raise AllProvidersFailed(last_error)
 
 
-async def list_models() -> Dict[str, dict]:
-    """Return ALL model ids for every healthy provider. Cheap call —
-    the SDK caches the response, and `/v1/models` is unauthenticated on
-    most providers (returns 200 for any key)."""
-    results: Dict[str, dict] = {}
-    for provider in _available_providers():
-        c = _client_for(provider)
-        if not c:
-            continue
-        client, base = c
-        try:
-            r = await client.models.list()
-            ids = sorted({m.id for m in getattr(r, "data", [])})
-            results[provider] = {
-                "ok": True,
-                "base": base,
-                "models": ids,
-            }
-        except Exception as e:
-            results[provider] = {
-                "ok": False,
-                "base": base,
-                "error": f"{type(e).__name__}: {e}",
-                "models": [],
-            }
-    return results
+def _error_kind(exc: Exception) -> str:
+    if isinstance(exc, AuthenticationError): return "authentication"
+    if isinstance(exc, RateLimitError): return "rate_limit"
+    if isinstance(exc, BadRequestError): return "bad_request"
+    if isinstance(exc, ProviderUnavailable): return "provider_unavailable"
+    return "transport"
 
 
-# ---------------------------------------------------------------------------
-# Streaming chat completion with model-chain failover.
-# ---------------------------------------------------------------------------
-class AllProvidersFailed(Exception):
-    pass
-
-
-async def _try_one_attempt(
-    *,
-    provider: str,
-    model: str,
-    messages: List[dict],
-    temperature: float,
-    max_tokens: int,
-    request_id: str,
-    attempt_idx: int,
-):
-    """Yield events for a single (provider, model) attempt. Raises on
-    transport failure. Returns nothing on success."""
-    c = _client_for(provider)
-    if not c:
-        return
-    client, base = c
-    attempt_started = time.time()
-    attempt_event = {
-        "request_id": request_id,
-        "provider": provider,
-        "model": model,
-        "base_url": base,
-        "index": attempt_idx,
-    }
-    yield ("attempt", attempt_event)
-    audit.record("llm.attempt_start", attempt_event)
-
-    stream = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-
-    opened = False
-    content_buf = ""
-    usage_payload: dict = {}
-
-    async for chunk in stream:
-        if getattr(chunk, "usage", None):
-            u = chunk.usage
-            usage_payload = {
-                "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(u, "total_tokens", 0) or 0,
-            }
-        for choice in getattr(chunk, "choices", []) or []:
-            delta = getattr(choice, "delta", None)
-            if delta is None:
-                continue
-            content = getattr(delta, "content", None)
-            if content:
-                if not opened:
-                    yield ("open", {"model": model, "provider": provider})
-                    opened = True
-                content_buf += content
-                yield ("delta", {"text": content})
-
-    latency = int((time.time() - attempt_started) * 1000)
-    audit.record("llm.attempt_ok", {
-        **attempt_event,
-        "latency_ms": latency,
-        "completion_chars": len(content_buf),
-        "usage": usage_payload,
-    })
-    yield ("done", {
-        "model": model,
-        "provider": provider,
-        "latency_ms": latency,
-        "completion_chars": len(content_buf),
-        "usage": usage_payload,
-    })
-
-
-async def stream_chat(
-    *,
-    model_chain: List[str],
-    messages: List[dict],
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
-    request_id: str = "",
-) -> AsyncIterator[Tuple[str, dict]]:
-    """
-    Yield (event_type, payload) tuples over the wire.
-    event_type ∈ {open, delta, done, error, attempt}.
-    """
-    last_error: Optional[str] = None
-    attempt_idx = 0
-    for model in model_chain:
-        # Build the candidate provider list for this model:
-        # primary provider first, then OpenRouter as a safety net.
-        primary = _provider_for_model(model)
-        candidates = [primary]
-        if primary != "openrouter" and settings.openrouter_api_key:
-            candidates.append("openrouter")
-
-        for provider in candidates:
-            attempt_idx += 1
-            try:
-                gen = _try_one_attempt(
-                    provider=provider,
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    request_id=request_id,
-                    attempt_idx=attempt_idx,
-                )
-                async for ev in gen:
-                    yield ev
-                return
-            except AuthenticationError as e:
-                err = f"auth_failed: {e}"
-                last_error = err
-                audit.record("llm.attempt_auth_fail", {"request_id": request_id, "model": model, "provider": provider, "error": err})
-                yield ("error", {"model": model, "provider": provider, "kind": "auth", "message": str(e)})
-                # Don't try other providers with the same bad key
-                if provider == primary:
-                    break
-                continue
-            except RateLimitError as e:
-                err = f"rate_limited: {e}"
-                last_error = err
-                audit.record("llm.attempt_rate_limit", {"request_id": request_id, "model": model, "provider": provider, "error": err})
-                yield ("error", {"model": model, "provider": provider, "kind": "rate_limit", "message": str(e)})
-                continue
-            except (APIConnectionError, APIStatusError, BadRequestError) as e:
-                err = f"{type(e).__name__}: {e}"
-                last_error = err
-                audit.record("llm.attempt_transport_fail", {"request_id": request_id, "model": model, "provider": provider, "error": err})
-                yield ("error", {"model": model, "provider": provider, "kind": "transport", "message": err})
-                continue
-            except Exception as e:
-                err = f"unexpected: {type(e).__name__}: {e}"
-                last_error = err
-                audit.record("llm.attempt_unexpected", {"request_id": request_id, "model": model, "provider": provider, "error": err})
-                yield ("error", {"model": model, "provider": provider, "kind": "unexpected", "message": err})
-                continue
-
-    raise AllProvidersFailed(last_error or "no provider available")
+def _public_error(exc: Exception) -> str:
+    if isinstance(exc, AuthenticationError): return "provider_authentication_failed"
+    if isinstance(exc, RateLimitError): return "provider_rate_limited"
+    if isinstance(exc, BadRequestError): return "provider_rejected_request"
+    if isinstance(exc, ProviderUnavailable): return str(exc)
+    if isinstance(exc, (APIConnectionError, APIStatusError)): return "provider_unavailable"
+    return "provider_error"
