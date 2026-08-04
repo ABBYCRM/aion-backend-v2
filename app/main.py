@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -591,6 +592,26 @@ async def vault_reconcile(principal: Principal = Depends(require_admin)):
     seeded = vault.reconcile_with_env(actor=f"admin:{principal.subject}")
     audit.record("vault.reconciled", {"subject": principal.subject, "seeded": seeded})
     return {"ok": True, "seeded": seeded, "known_keys": len(VAULT_KNOWN_KEYS)}
+
+@app.delete("/api/vault/{name}")
+async def vault_delete(name: str, principal: Principal = Depends(confirmed_admin)):
+    """Fully remove a key from the vault. Also clears the live env alias so
+    the running app stops using it."""
+    info = next((k for k in VAULT_KNOWN_KEYS if k["name"] == name), None)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"unknown_key: {name}")
+    removed = vault.delete_value(name)
+    if not removed:
+        raise HTTPException(status_code=404, detail="key_not_found")
+    # Clear the live env alias so the running app stops using the deleted key.
+    env_alias = info.get("env_aliases") or name
+    os.environ.pop(env_alias, None)
+    audit.record("vault.deleted", {"subject": principal.subject, "name": name, "env_alias": env_alias})
+    return {"ok": True, "name": name, "deleted": True, "env_cleared": env_alias}
+
+# ===========================================================================
+# Gallery — persistent image + video store
+# ===========================================================================
 
 
 # ===========================================================================

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -16,6 +17,19 @@ except ImportError:
 
 from .audit import audit
 from .settings import settings
+
+# Lazy import to avoid circular: vault reads settings which is imported above
+def _vault_value(name: str) -> str:
+    """Read a secret from the vault, falling back to settings/env. The
+    vault is the single source of truth at runtime once the operator
+    has rotated a key via /api/vault/{name}/rotate."""
+    try:
+        from .vault import vault as _vault
+        v = _vault.reveal(name)
+        if v: return v
+    except Exception:
+        pass
+    return os.getenv(name, "").strip()
 
 
 class AllProvidersFailed(RuntimeError): pass
@@ -42,31 +56,68 @@ def _pooled_key(provider: str, raw: str) -> str:
 
 def configured_providers() -> list[str]:
     providers = []
-    if settings.openrouter_api_key: providers.append("openrouter")
-    if settings.moonshot_api_key: providers.append("moonshot")
-    if settings.openai_api_key: providers.append("openai")
-    if settings.nvidia_api_key: providers.append("nvidia")
-    if settings.bitdeer_api_key: providers.append("bitdeer")
-    if settings.cloudflare_api_token and settings.cloudflare_url: providers.append("cloudflare")
+    if _vault_value("OPENAI_API_KEY"): providers.append("openai")
+    if _vault_value("MOONSHOT_API_KEY") or _vault_value("KIMI_API_KEY"): providers.append("moonshot")
+    if _vault_value("NVIDIA_API_KEY"): providers.append("nvidia")
+    if _vault_value("BITDEER_API_KEY"): providers.append("bitdeer")
+    if _vault_value("OPENROUTER_API_KEY"): providers.append("openrouter")
+    if _vault_value("ANTHROPIC_API_KEY"): providers.append("anthropic")
+    if _vault_value("HELICONE_API_KEY"): providers.append("helicone")
+    if _vault_value("CLOUDFLARE_API_TOKEN") and _vault_value("CLOUDFLARE_BASE_URL"): providers.append("cloudflare")
     return providers
 
 
 def _client_for(provider: str) -> Any:
     if AsyncOpenAI is None: raise ProviderUnavailable("openai_sdk_not_installed")
-    if provider == "openrouter" and settings.openrouter_api_key:
-        return AsyncOpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url, timeout=settings.request_timeout_seconds, default_headers={"HTTP-Referer": settings.openrouter_app_url, "X-Title": settings.openrouter_app_name})
-    if provider == "moonshot" and settings.moonshot_api_key:
-        return AsyncOpenAI(api_key=settings.moonshot_api_key, base_url=settings.moonshot_base_url, timeout=settings.request_timeout_seconds)
-    if provider == "openai" and settings.openai_api_key:
-        return AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
+    if provider == "openai":
+        key = _vault_value("OPENAI_API_KEY")
+        if key: return AsyncOpenAI(api_key=key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
+    if provider == "moonshot":
+        key = _vault_value("MOONSHOT_API_KEY") or _vault_value("KIMI_API_KEY")
+        if key:
+            base = settings.moonshot_base_url
+            # Moonshot / Kimi uses different base URLs depending on region.
+            if "moonshot.cn" in base or not base:
+                base = "https://api.moonshot.cn/v1"
+            return AsyncOpenAI(api_key=key, base_url=base, timeout=settings.request_timeout_seconds)
     if provider == "nvidia":
-        key = _pooled_key("nvidia", settings.nvidia_api_key)
+        key = _pooled_key("nvidia", _vault_value("NVIDIA_API_KEY"))
         if key: return AsyncOpenAI(api_key=key, base_url=settings.nvidia_base_url, timeout=settings.request_timeout_seconds)
     if provider == "bitdeer":
-        key = _pooled_key("bitdeer", settings.bitdeer_api_key)
+        key = _pooled_key("bitdeer", _vault_value("BITDEER_API_KEY"))
         if key: return AsyncOpenAI(api_key=key, base_url=settings.bitdeer_base_url, timeout=settings.request_timeout_seconds, default_headers={"User-Agent": f"AION/{settings.app_version}"})
-    if provider == "cloudflare" and settings.cloudflare_api_token and settings.cloudflare_url:
-        return AsyncOpenAI(api_key=settings.cloudflare_api_token, base_url=settings.cloudflare_url, timeout=settings.request_timeout_seconds)
+    if provider == "openrouter":
+        key = _vault_value("OPENROUTER_API_KEY")
+        if key:
+            return AsyncOpenAI(api_key=key, base_url=settings.openrouter_base_url, timeout=settings.request_timeout_seconds, default_headers={"HTTP-Referer": settings.openrouter_app_url, "X-Title": settings.openrouter_app_name})
+    if provider == "anthropic":
+        # Anthropic is NOT OpenAI-compatible; we route through the OpenAI
+        # client only if a base URL is set that exposes a compat shim.
+        # The default path is /v1/messages and uses x-api-key + anthropic-version.
+        # For now, expose it via a thin adapter: if OPENAI_BASE_URL is pointed
+        # at an Anthropic-compat proxy, use that. Otherwise this provider is
+        # not configured.
+        key = _vault_value("ANTHROPIC_API_KEY")
+        if key and settings.openai_base_url and "anthropic" in settings.openai_base_url.lower():
+            return AsyncOpenAI(api_key=key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
+    if provider == "helicone":
+        # Helicone is a proxy: hit api.helicone.ai as OpenAI-compatible with
+        # the user's OpenAI key passed via Authorization and the Helicone
+        # key in the Helicone-Auth header.
+        hkey = _vault_value("HELICONE_API_KEY")
+        okey = _vault_value("OPENAI_API_KEY")
+        if hkey and okey:
+            return AsyncOpenAI(
+                api_key=okey,
+                base_url="https://oai.helicone.ai/v1",
+                timeout=settings.request_timeout_seconds,
+                default_headers={"Helicone-Auth": f"Bearer {hkey}"},
+            )
+    if provider == "cloudflare":
+        key = _vault_value("CLOUDFLARE_API_TOKEN")
+        url = _vault_value("CLOUDFLARE_BASE_URL")
+        if key and url:
+            return AsyncOpenAI(api_key=key, base_url=url, timeout=settings.request_timeout_seconds)
     raise ProviderUnavailable(f"provider_not_configured:{provider}")
 
 
@@ -93,11 +144,14 @@ async def probe() -> dict[str, dict[str, Any]]:
 
 
 def _default_provider(model: str) -> str:
-    if (model.startswith("moonshotai/") or model.startswith("kimi-")) and settings.moonshot_api_key: return "moonshot"
-    if (model.startswith("gpt-") or model.startswith(("o1", "o3", "o4"))) and settings.openai_api_key: return "openai"
-    if model.startswith(("nvidia/", "meta/", "mistralai/", "google/")) and settings.nvidia_api_key: return "nvidia"
-    if model.startswith(("deepseek-", "deepseek/")) and settings.bitdeer_api_key: return "bitdeer"
-    if model.startswith("@cf/") and settings.cloudflare_api_token and settings.cloudflare_url: return "cloudflare"
+    if (model.startswith("moonshotai/") or model.startswith("kimi-")) and (_vault_value("MOONSHOT_API_KEY") or _vault_value("KIMI_API_KEY")): return "moonshot"
+    if (model.startswith("gpt-") or model.startswith(("o1", "o3", "o4"))) and _vault_value("OPENAI_API_KEY"):
+        if _vault_value("HELICONE_API_KEY"): return "helicone"
+        return "openai"
+    if model.startswith(("nvidia/", "meta/", "mistralai/", "google/")) and _vault_value("NVIDIA_API_KEY"): return "nvidia"
+    if model.startswith(("deepseek-", "deepseek/")) and _vault_value("BITDEER_API_KEY"): return "bitdeer"
+    if model.startswith("@cf/") and _vault_value("CLOUDFLARE_API_TOKEN") and _vault_value("CLOUDFLARE_BASE_URL"): return "cloudflare"
+    if model.startswith("claude-") and _vault_value("ANTHROPIC_API_KEY"): return "anthropic"
     return "openrouter"
 
 

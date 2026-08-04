@@ -419,3 +419,94 @@ def test_gallery_owner_scoped():
         )
         r = c.delete(f"/api/gallery/{item.id}", headers=USER_HEADERS)
         assert r.status_code == 404
+
+
+# ===========================================================================
+# Vault DELETE + LLM-vault wiring
+# ===========================================================================
+
+
+def test_vault_delete_removes_entry_and_clears_env(_vault_db):
+    client = TestClient(_vault_db.app)
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    # First set a value
+    client.post("/api/vault/OPENAI_API_KEY/rotate", headers=headers, json={"value": "sk-test-to-delete"})
+    r = client.get("/api/vault", headers=ADMIN_HEADERS)
+    item = next(i for i in r.json()["items"] if i["name"] == "OPENAI_API_KEY")
+    assert item["has_value"] is True
+    # Delete it
+    r = client.delete("/api/vault/OPENAI_API_KEY", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["deleted"] is True
+    assert body["env_cleared"] == "OPENAI_API_KEY"
+    # Should be gone now
+    r = client.get("/api/vault", headers=ADMIN_HEADERS)
+    item = next((i for i in r.json()["items"] if i["name"] == "OPENAI_API_KEY"), None)
+    assert item is None
+    # Env should be cleared
+    import os as _os
+    assert _os.environ.get("OPENAI_API_KEY", "") == ""
+
+
+def test_vault_delete_requires_admin(_vault_db):
+    client = TestClient(_vault_db.app)
+    r = client.delete("/api/vault/OPENAI_API_KEY", headers=USER_HEADERS)
+    assert r.status_code == 403
+
+
+def test_vault_delete_requires_confirm(_vault_db):
+    client = TestClient(_vault_db.app)
+    r = client.delete("/api/vault/OPENAI_API_KEY", headers=ADMIN_HEADERS)
+    assert r.status_code == 409  # confirmation required
+
+
+def test_vault_delete_unknown_key_returns_404(_vault_db):
+    client = TestClient(_vault_db.app)
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    r = client.delete("/api/vault/NOT_A_REAL_KEY", headers=headers)
+    assert r.status_code == 404
+
+
+def test_llm_uses_vault_key_not_settings(_vault_db, monkeypatch):
+    """If a key is set in BOTH settings and the vault, the vault wins."""
+    import os
+    # Set a fake key in both places
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env-WRONG")
+    client = TestClient(_vault_db.app)
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    # Vault wins
+    client.post("/api/vault/OPENAI_API_KEY/rotate", headers=headers, json={"value": "sk-from-vault-WINNER"})
+    # Reload modules so _vault_value picks up the new vault
+    import importlib
+    from app import llm, vault
+    importlib.reload(vault)
+    from app import main as main_mod
+    importlib.reload(main_mod)
+    importlib.reload(llm)
+    # _vault_value should prefer the vault
+    from app.llm import _vault_value
+    assert _vault_value("OPENAI_API_KEY") == "sk-from-vault-WINNER", f"got: {_vault_value('OPENAI_API_KEY')}"
+
+
+def test_llm_configured_providers_sees_vault_only_keys(_vault_db, monkeypatch):
+    """A key set ONLY in the vault (never in env) should be picked up
+    by configured_providers()."""
+    # Clear all relevant envs
+    for k in ["OPENAI_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY", "BITDEER_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "HELICONE_API_KEY"]:
+        monkeypatch.setenv(k, "")
+    client = TestClient(_vault_db.app)
+    headers = {**ADMIN_HEADERS, "X-AION-Confirm": "yes"}
+    # Set a key in the vault only
+    client.post("/api/vault/KIMI_API_KEY/rotate", headers=headers, json={"value": "sk-kimi-from-vault"})
+    # Reload modules
+    import importlib
+    from app import llm, vault, settings
+    importlib.reload(vault)
+    from app import main as main_mod
+    importlib.reload(main_mod)
+    importlib.reload(llm)
+    from app.llm import configured_providers
+    providers = configured_providers()
+    assert "moonshot" in providers, f"providers: {providers}"
