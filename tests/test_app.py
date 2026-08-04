@@ -103,11 +103,18 @@ def test_github_routes_fail_clean_when_no_creds():
 
 
 def test_attachment_size_limit_enforced():
+    """BodyLimitMiddleware must return 413 when request body exceeds the
+    configured max_request_bytes, regardless of Pydantic validation order."""
+    import os
+    from app.settings import Settings
+    # Force a small limit for this test (default is 2MB)
+    small = Settings.from_env.__func__  # noqa
+    # Read current limit and create a body bigger than it
+    from app.settings import settings
+    big = "x" * (settings.max_request_bytes + 100_000)
     with TestClient(app) as client:
-        # max_request_bytes is 200_000 in test env
-        big = "x" * 300_000
         response = client.post("/api/chat", headers=USER_HEADERS, json={"messages": [{"role": "user", "content": big}]})
-        # BodyLimitMiddleware should 413
+        # BodyLimitMiddleware should 413 (not 422 from Pydantic)
         assert response.status_code == 413, f"expected 413 for oversize body, got {response.status_code}"
 
 
@@ -203,3 +210,31 @@ def test_search_route_works_without_brave_key():
         assert "results" in body
         assert "count" in body
         assert body["count"] == len(body["results"])
+
+
+# ---------------------------------------------------------------------------
+# Chat capacity 200+ok=false (was 503; DO edge wraps 5xx as HTML 504)
+# ---------------------------------------------------------------------------
+
+def test_chat_capacity_handler_is_registered():
+    """When the chat semaphore is exhausted, the exception must be handled
+    by a registered FastAPI exception handler that returns 200+ok=false.
+    This prevents the DO Cloudflare edge from wrapping the 5xx as an HTML
+    504 page the frontend cannot parse."""
+    from app.main import app
+    from app.rate_limit import _ChatCapacityExhausted
+    handlers = app.exception_handlers
+    assert _ChatCapacityExhausted in handlers, "No exception handler registered for _ChatCapacityExhausted"
+    # Verify the handler returns the expected clean JSON shape by calling it directly
+    from starlette.requests import Request
+    import asyncio
+    handler = handlers[_ChatCapacityExhausted]
+    response = asyncio.run(handler(Request({"type": "http"}), _ChatCapacityExhausted()))
+    assert response.status_code == 200
+    import json
+    body = json.loads(response.body)
+    assert body["ok"] is False
+    assert body["kind"] == "rate_limited"
+    assert body["error"] == "chat_capacity_exhausted"
+    assert body["retry_after_seconds"] == 1
+

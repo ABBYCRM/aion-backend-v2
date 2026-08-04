@@ -18,7 +18,7 @@ from .auth import Principal, require_admin, require_principal
 from .kernel import AION_CONTINUITY_PACK, MissionContext, build_system_prompt, resolve_decision
 from .llm import AllProvidersFailed, InvalidModelSelection, configured_providers, list_models, probe, resolve_model_chain, stream_chat
 from .notes import SecretLikeValue, notes
-from .rate_limit import enforce_rate_limit, limiter
+from .rate_limit import _ChatCapacityExhausted, enforce_rate_limit, limiter
 from .settings import settings
 from .tools import ToolConfigurationError, ToolRequestError, github, web_search
 
@@ -121,6 +121,8 @@ app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), al
 async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "tool_not_configured"})
 @app.exception_handler(ToolRequestError)
 async def tool_request(_: Request, exc: ToolRequestError): return JSONResponse(status_code=400, content={"detail": str(exc)})
+@app.exception_handler(_ChatCapacityExhausted)
+async def chat_capacity(_: Request, exc: _ChatCapacityExhausted): return JSONResponse(status_code=200, content={"ok": False, "error": "chat_capacity_exhausted", "kind": "rate_limited", "retry_after_seconds": 1})
 
 async def authenticated(request: Request, principal: Principal = Depends(require_principal)):
     await enforce_rate_limit(request, principal); return principal
@@ -374,8 +376,6 @@ async def video_content(video_id: str, _: Principal = Depends(authenticated)):
         resp = await client.get(f"/videos/{video_id}/content", headers={"Authorization": f"Bearer {settings.openai_api_key}"})
         if resp.status_code >= 500:
             # DO Cloudflare edge wraps 5xx as HTML 504 — return 200+ok=false
-            return {"ok": False, "error": _extract_error(resp), "kind": "video_status_error", "video_id": video_id, "upstream_status": resp.status_code}
-        if resp.status_code >= 500:
             return {"ok": False, "error": _extract_error(resp), "kind": "video_content_error", "video_id": video_id, "upstream_status": resp.status_code}
         if resp.status_code >= 400: raise HTTPException(status_code=resp.status_code, detail=_extract_error(resp))
         import base64

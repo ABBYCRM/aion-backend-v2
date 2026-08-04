@@ -35,11 +35,21 @@ class SlidingWindowLimiter:
         try:
             await asyncio.wait_for(self._chat_semaphore.acquire(), timeout=1.0)
         except TimeoutError as exc:
-            raise HTTPException(status_code=503, detail="chat_capacity_exhausted") from exc
+            # Return 200+ok=false instead of 503 so the DO Cloudflare edge
+            # does not wrap it as HTML 504 (the client cannot parse HTML).
+            from fastapi.responses import JSONResponse
+            raise _ChatCapacityExhausted() from exc
         try:
             yield
         finally:
             self._chat_semaphore.release()
+
+
+class _ChatCapacityExhausted(Exception):
+    """Raised by chat_slot when the concurrent-chat semaphore is fully booked.
+    Caught by the chat route and converted to a clean 200+ok=false response
+    so the DO Cloudflare edge does not wrap the error as HTML 504."""
+
 
 
 limiter = SlidingWindowLimiter()
