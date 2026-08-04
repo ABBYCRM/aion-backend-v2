@@ -481,6 +481,14 @@ if _os.path.isdir(_STATIC_DIR):
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def on_startup() -> None:
+    # Seed the scratchpad from AION_SCRATCHPAD_SEED if the env var is set.
+    # This lets the operator pin baseline entries (API keys, project URLs)
+    # in the runtime spec so they survive container redeploys.
+    try:
+        from .scratchpad import _seed_from_env
+        _seed_from_env()
+    except Exception as _e:
+        print(f"[AION] scratchpad seed failed: {_e}")
     audit.record("aion.startup", {"version": settings.app_version, "env": settings.environment})
     # Run the live provider probe in the background with a hard timeout so
     # it never blocks startup. If a provider is slow/unreachable, the server

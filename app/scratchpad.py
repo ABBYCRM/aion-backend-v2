@@ -24,6 +24,7 @@ Design:
 """
 from __future__ import annotations
 import hashlib
+import os
 import json
 import re
 import time
@@ -162,6 +163,47 @@ def _mask(value: str) -> str:
     if len(value) <= _MASK_PREFIX + _MASK_SUFFIX + 2:
         return "*" * len(value)
     return f"{value[:_MASK_PREFIX]}{'*' * max(4, len(value) - _MASK_PREFIX - _MASK_SUFFIX)}{value[-_MASK_SUFFIX:]}"
+
+
+def _seed_from_env() -> None:
+    """If AION_SCRATCHPAD_SEED is set, parse it as JSON and prepend any
+    entries whose ids we don\'t already have. Used so an operator can
+    pin a baseline scratchpad (API keys, project URLs) into the runtime
+    spec without manually re-entering them after every redeploy."""
+    raw = os.environ.get("AION_SCRATCHPAD_SEED", "").strip()
+    if not raw:
+        return
+    try:
+        seed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[scratchpad] AION_SCRATCHPAD_SEED is not valid JSON: {e}", flush=True)
+        return
+    if not isinstance(seed, list):
+        return
+    sp = Scratchpad()
+    existing = {e.get("id") for e in sp._read_all()}
+    added = 0
+    for item in seed:
+        if not isinstance(item, dict):
+            continue
+        if item.get("id") in existing:
+            continue
+        try:
+            sp.add(
+                name=item.get("name", "seed"),
+                value=item.get("value", ""),
+                kind=item.get("kind", "note"),
+                tags=item.get("tags", []),
+                source=item.get("source", "seed"),
+                notes=item.get("notes", ""),
+                thread_id=item.get("thread_id", ""),
+                skip_kernel_sign=item.get("skip_kernel_sign", False),
+            )
+            added += 1
+        except Exception as exc:
+            print(f"[scratchpad] seed add failed: {exc}", flush=True)
+    if added:
+        print(f"[scratchpad] seeded {added} entries from AION_SCRATCHPAD_SEED", flush=True)
 
 
 def _open_store() -> tuple:
