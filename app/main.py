@@ -641,6 +641,18 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             tool_events.append({"type": "tool", "tool": "web_search", "query": search_query, "results": [result.__dict__ for result in results]})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
     repository, github_mode, github_argument = _github_request(body, user_text)
+    # Intent-routing: if the user turn is github-intent (github.com, "search github",
+    # "find repos for X") and no explicit /github command was parsed, treat the
+    # rest of the turn as a github.search query. This is what the user actually
+    # meant when they wrote "/search github.com for agentic software".
+    if not repository and _is_github_intent(user_text):
+        # Extract the search terms: drop the github trigger words.
+        terms = _GITHUB_INTENT_RE.sub(" ", user_text)
+        terms = re.sub(r"\s+", " ", terms).strip()
+        if terms and (settings.github_token or settings.github_app_configured):
+            repository = "_search_only_"
+            github_mode = "search"
+            github_argument = terms[:200]
     if repository:
         try:
             if github_mode == "file" and github_argument: result = await github.get_file(repository, github_argument)
@@ -683,6 +695,13 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
         else:
             yield _sse(brain_client.brain_sse.disabled())
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
+        # P0: emit a tools_used event BEFORE per-tool events so the UI topbar
+        # can display which tools actually fired on this turn. Empty list =
+        # no tool was needed (general-knowledge answer).
+        tools_used = []
+        if search_query: tools_used.append("web_search")
+        if repository: tools_used.append(f"github_{github_mode}")
+        yield _sse({"type": "tools_used", "request_id": mission.request_id, "tools": tools_used})
         for event in tool_events:
             yield _sse(event)
 
@@ -1010,8 +1029,45 @@ async def gallery_raw(item_id: str, principal: Principal = Depends(authenticated
     return Response(content=data, media_type=item.mime, headers={"Cache-Control": "private, max-age=300", "X-AION-Filename": item.filename, "Content-Disposition": f'inline; filename="{item.filename}"'})
 
 def _sse(payload): return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+# A query is "github intent" if it mentions github.com, "search github", "github repos",
+# "find a repo", etc. For these, web search returns junk; route them to github.search
+# instead (called by the chat() handler below).
+_GITHUB_INTENT_RE = re.compile(
+    r"\b("
+    r"github\.com|search\s+github|github\s+search|"
+    r"find\s+(a\s+)?repo|find\s+repos|github\s+repo"
+    r")\b",
+    re.I,
+)
+
+
+def _is_github_intent(text: str) -> bool:
+    return bool(_GITHUB_INTENT_RE.search(text or ""))
+
+
 def _search_query(enabled, text):
-    stripped = text.strip(); return stripped[8:].strip()[:400] if stripped.lower().startswith("/search ") else stripped[:400] if enabled else ""
+    """Resolve the web-search query from the user turn.
+
+    Rules:
+      - If the user typed /search ..., strip the prefix and return the rest.
+      - If web_search is enabled, the entire turn is the query.
+      - If the turn is GITHUB intent (github.com, "search github", ...), skip web
+        search — github.search handles it. We return "" so the chat() handler
+        doesn't fire a redundant web search that returns the same public pages.
+      - LinkedIn: web search is the only path (no LinkedIn API). We do not suppress.
+    """
+    stripped = (text or "").strip()
+    if stripped.lower().startswith("/search "):
+        return stripped[8:].strip()[:400]
+    if not enabled:
+        return ""
+    if _is_github_intent(stripped):
+        # Suppress web search for github.com / "search github" — let the
+        # github.search tool handle the lookup. Web search on these queries
+        # returns SEO-blog spam about GitHub the website, not the actual
+        # repos the user wants.
+        return ""
+    return stripped[:400]
 def _defer_tool_failure_text(tool_errors, *, repository: str = "", search_query: str = "") -> str:
     """Hardcoded refusal streamed to the client when the kernel DEFERs
     because a tool was requested and errored. The LLM never sees this
