@@ -538,9 +538,27 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             # Stream from Brain. AION keeps the local system prompt, tool
             # results, and notes context. Brain does the 7-law re-decision
             # (if it wants) and the LLM provider chain.
+            # Brain only accepts user/assistant roles. We fold the system
+            # prompt into the first user message so Brain sees a single
+            # user turn containing the kernel + tools + question.
+            brain_messages: list[dict[str, Any]] = []
+            for m in model_messages:
+                role = m.get("role")
+                content = m.get("content")
+                if role == "system":
+                    if brain_messages:
+                        # Prepend to the previous user message
+                        if brain_messages[0]["role"] == "user":
+                            brain_messages[0]["content"] = f"{content}\n\n{brain_messages[0]['content']}"
+                        else:
+                            brain_messages.insert(0, {"role": "user", "content": content})
+                    else:
+                        brain_messages.append({"role": "user", "content": content})
+                else:
+                    brain_messages.append({"role": role, "content": content})
             try:
                 async with limiter.chat_slot():
-                    async for evt in brain_client.stream_chat(messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
+                    async for evt in brain_client.stream_chat(messages=brain_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
                         if evt.get("type") == "[DONE]":
                             yield b"data: [DONE]\n\n"; return
                         # Forward all Brain SSE events unchanged. The
