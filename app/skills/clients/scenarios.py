@@ -284,3 +284,4 @@ async def scenario_index(
         "packs_indexed": packs_to_index,
         "scenarios_dir": str(scenarios_dir),
     }
+
