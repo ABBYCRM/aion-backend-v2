@@ -2692,10 +2692,12 @@ def test_github_scenarios_root_is_symlink_to_canonical():
 # This is the test the architecture spec called for under "Next Test to Add".
 # =============================================================================
 
-def _stream_chat(client, messages, monkeypatch):
+def _stream_chat(client, messages, monkeypatch, *, web_search: bool = False):
     """Helper: POST /api/chat with the given messages and return the SSE
     text + the parsed decision event. Brain is disabled to keep the test
-    deterministic on the local backend path.
+    deterministic on the local backend path. web_search defaults to False
+    (the body.web_search toggle); the /-prefix override is tested by
+    explicitly passing web_search=False to verify the prefix still wins.
     """
     monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
     r = client.post(
@@ -2703,7 +2705,7 @@ def _stream_chat(client, messages, monkeypatch):
         headers=USER_HEADERS,
         json={
             "messages": messages,
-            "web_search": False,
+            "web_search": web_search,
             "max_tokens": 256,
             "temperature": 0,
             "stream": True,
@@ -3022,3 +3024,116 @@ def test_contextual_continuity_survives_tool_use(_vault_db, monkeypatch):
     assert status == 200
     reply = _extract_deltas(text).strip()
     assert "47" in reply, f"history not preserved: reply was {reply!r}"
+
+
+# -----------------------------------------------------------------------------
+# /search prefix aliases: /websearch, /web search, /web must all set
+# search_query. Locked in so operators can type any of them and get
+# the same web-search behavior.
+# -----------------------------------------------------------------------------
+
+def test_search_query_strips_slash_search_prefix():
+    from app.main import _search_query
+    assert _search_query(True, "/search Florida traffic law") == "Florida traffic law"
+
+def test_search_query_strips_slash_websearch_prefix():
+    from app.main import _search_query
+    assert _search_query(True, "/websearch Florida traffic law") == "Florida traffic law"
+
+def test_search_query_strips_slash_web_space_prefix():
+    from app.main import _search_query
+    assert _search_query(True, "/web search Florida traffic law") == "Florida traffic law"
+
+def test_search_query_strips_slash_web_prefix():
+    from app.main import _search_query
+    assert _search_query(True, "/web Florida traffic law") == "Florida traffic law"
+
+def test_search_query_returns_empty_when_disabled_and_no_prefix():
+    """If web_search toggle is off AND user did not type a /-prefix, the
+    function returns "" so the chat() handler does not fire a web search
+    silently. Only the explicit /-prefix overrides the toggle."""
+    from app.main import _search_query
+    assert _search_query(False, "Hello there") == ""
+
+def test_search_query_prefix_overrides_disabled_toggle():
+    """If the user typed /search explicitly, the prefix always wins
+    over web_search=false. This is the operator's escape hatch."""
+    from app.main import _search_query
+    assert _search_query(False, "/search Florida traffic law") == "Florida traffic law"
+
+def test_search_query_caps_at_400_chars():
+    from app.main import _search_query
+    long = "x" * 600
+    out = _search_query(True, f"/search {long}")
+    assert len(out) == 400
+
+def test_resolve_web_query_strips_websearch_prefix():
+    """The intent router (used when body.web_search is False but the
+    user typed a /-prefix) must also strip the new aliases."""
+    from app.main import resolve_web_query
+    assert resolve_web_query("/websearch Florida traffic law", None) == "Florida traffic law"
+    assert resolve_web_query("/web search Florida traffic law", None) == "Florida traffic law"
+    assert resolve_web_query("/web Florida traffic law", None) == "Florida traffic law"
+
+
+# -----------------------------------------------------------------------------
+# End-to-end chat: /search with law queries must fire web_search,
+# return real results, and not show "I cannot search" disclaimer.
+# This is the operator's failure mode in the spec — locks the fix.
+# -----------------------------------------------------------------------------
+
+def test_chat_slash_search_fires_web_search_for_law_query(_vault_db, monkeypatch):
+    """/search <law query> must fire web_search and not show the denial
+    disclaimer. Locks the operator's primary failure case. Uses the
+    existing _stream_chat helper because /api/chat returns SSE, not
+    plain JSON."""
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    client = TestClient(main_mod.app)
+    status, text = _stream_chat(
+        client,
+        [{"role": "user", "content": "/search Florida automated red light camera citation statute"}],
+        monkeypatch,
+        web_search=True,
+    )
+    assert status == 200
+    # tools_used SSE event must include web_search
+    import re as _re
+    m = _re.search(r'"type":"tools_used"[^}]*"tools":\[[^\]]*\]', text)
+    assert m is not None, f"no tools_used event in SSE: {text[:300]}"
+    assert "web_search" in m.group(0), f"web_search not in tools_used: {m.group(0)}"
+    # No denial disclaimer in the reply
+    reply = _extract_deltas(text).lower()
+    for phrase in [
+        "i cannot search", "i can't search", "i'm unable to search",
+        "i am unable to search", "i don't have access to",
+        "i do not have access to",
+    ]:
+        assert phrase not in reply, f"denial disclaimer in reply: {reply[:200]!r}"
+
+
+def test_chat_slash_websearch_alias_fires_web_search(_vault_db, monkeypatch):
+    """/websearch (one word) must work the same as /search. This is the
+    operator's typed alias and we want to lock that it routes correctly
+    even with body.web_search=false."""
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    client = TestClient(main_mod.app)
+    status, text = _stream_chat(
+        client,
+        [{"role": "user", "content": "/websearch Florida traffic law"}],
+        monkeypatch,
+        # Override the helper default: pass web_search=False explicitly.
+        # The /-prefix must still trigger web_search.
+    )
+    assert status == 200
+    import re as _re
+    m = _re.search(r'"type":"tools_used"[^}]*"tools":\[[^\]]*\]', text)
+    assert m is not None, f"no tools_used event in SSE: {text[:300]}"
+    assert "web_search" in m.group(0), f"/websearch did not fire web_search: {m.group(0)}"

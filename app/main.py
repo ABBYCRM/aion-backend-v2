@@ -1445,8 +1445,9 @@ def resolve_web_query(user_text: str, explicit_search: str | None) -> str | None
     web search should fire.
 
     Rules (in order):
-      1. If the user typed /search <q>, the q is the search; rewrite
-         "github.com" / "linkedin.com" prefixes into a site: filter.
+      1. If the user typed /search <q> (or /websearch, /web search,
+         /web), the q is the search; rewrite "github.com" /
+         "linkedin.com" prefixes into a site: filter.
       2. If the user turn is a GitHub/LinkedIn intent (plain English or
          the /search variant), route to a site:-restricted web search
          instead of leaving the LLM to invent "I cannot search X".
@@ -1455,6 +1456,17 @@ def resolve_web_query(user_text: str, explicit_search: str | None) -> str | None
     Returns None when no web search is appropriate (e.g. user typed
     "Hello" with no search toggle).
     """
+    # Strip /search / /websearch / /web search / /web prefix too.
+    # These are operator-typed shortcuts and the chat() handler
+    # should treat them exactly like body.web_search=true with the
+    # rest of the text as the query. This is the only path that
+    # fires web_search when body.web_search is False.
+    if not explicit_search:
+        text_for_prefix = (user_text or "").lstrip()
+        for prefix in ("/search", "/websearch", "/web search", "/web"):
+            if text_for_prefix.lower().startswith(prefix + " "):
+                user_text = text_for_prefix[len(prefix) + 1:]
+                break
     if explicit_search:
         q = explicit_search.strip()
         if not q:
@@ -1471,6 +1483,19 @@ def resolve_web_query(user_text: str, explicit_search: str | None) -> str | None
     text = (user_text or "").strip()
     if not text:
         return None
+    # /search /websearch /web search /web <q>: the prefix made the
+    # intent explicit; return the rest as a plain web search query
+    # (capped at 400). github.com / linkedin.com variants still go
+    # through the site:-restricted path below.
+    if any(text_for_prefix.lower().startswith(p + " ") for p in ("/search", "/websearch", "/web search", "/web")):
+        q = text[:400]
+        if re.search(r"(?i)^github\.com", q) or re.search(r"(?i)site:\s*github", q):
+            rest = re.sub(r"(?i)^(site:)?github\.com\s*(for\s*)?", "", q).strip()
+            return (f"site:github.com {rest}" if rest else "site:github.com")[:400]
+        if re.search(r"(?i)^linkedin(\.com)?", q) or re.search(r"(?i)site:\s*linkedin", q):
+            rest = re.sub(r"(?i)^(site:)?linkedin(\.com)?\s*(for\s*)?", "", q).strip()
+            return (f"site:linkedin.com {rest}" if rest else "site:linkedin.com")[:400]
+        return q[:400]
     m = _GH_SEARCH_INTENT.search(text)
     if m:
         q = re.sub(r"^for\s+", "", m.group("q").strip(), flags=re.I).lower()
@@ -1587,8 +1612,14 @@ def _search_query(enabled, text):
       - LinkedIn: web search is the only path (no LinkedIn API). We do not suppress.
     """
     stripped = (text or "").strip()
-    if stripped.lower().startswith("/search "):
-        return stripped[8:].strip()[:400]
+    low = stripped.lower()
+    # /search <q>      -> q
+    # /websearch <q>   -> q  (operator alias)
+    # /web search <q>  -> q  (operator alias, with space)
+    # /web <q>         -> q  (common chat convention)
+    for prefix in ("/search ", "/websearch ", "/web search ", "/web "):
+        if low.startswith(prefix):
+            return stripped[len(prefix):].strip()[:400] or ""
     if not enabled:
         return ""
     if _is_github_intent(stripped):
