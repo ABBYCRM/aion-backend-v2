@@ -16,6 +16,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
 COPY --chown=aion:aion app ./app
+COPY --chown=aion:aion data ./data
 
 USER aion
 EXPOSE 8080
