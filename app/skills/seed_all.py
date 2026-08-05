@@ -11,7 +11,7 @@ scenario policy library:
   - scenario.match  (unified, all 5 packs at once)
   - scenario.index  (RAG indexer, 1 pack or all)
 
-Total: 25 contracts on boot.
+Total: 29 contracts on boot.
 """
 from __future__ import annotations
 
@@ -197,6 +197,33 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "properties": {"topic": {"type": "string"}, "level": {"type": "string"}, "language": {"type": "string"}, "catalog_path": {"type": "string"}}, "additionalProperties": True},
             executor="builtin:coding.books.catalog", tags=["books", "catalog"],
             error_codes=["catalog_not_found"]),
+        # ---- 4 coding-task skills (operator corpus, 2026-08-05) ----
+        # 5,000 structured engineering task briefs across 25 domains.
+        # Layer: code_corpus (problem statements, NOT solution code).
+        SkillSpec(id="coding.tasks.index", name="Coding tasks RAG indexer",
+            description="Upsert the 5,000 structured coding task briefs from data/tasks/coding_tasks_5000.jsonl into the coding_tasks RAG collection. Idempotent (JSONL ships with stable chunk_ids).",
+            side_effect="write",
+            input_schema={"type": "object", "properties": {"jsonl_path": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:coding.tasks.index", tags=["rag", "tasks", "code_corpus", "index"],
+            error_codes=["index_failed", "rag_store_unavailable"]),
+        SkillSpec(id="coding.tasks.search", name="Coding tasks search",
+            description="Keyword search the 5,000-task coding_tasks corpus. Returns ranked briefs with id/domain/task_type/system/title/objective/risks/edge_cases. Filterable by domain, task_type, context_name. Source: CSV (no embeddings required).",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "domain": {"type": "string"}, "task_type": {"type": "string"}, "context_name": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:coding.tasks.search", tags=["tasks", "code_corpus", "search"],
+            error_codes=["invalid_args", "search_failed"]),
+        SkillSpec(id="coding.tasks.get", name="Coding tasks get by id",
+            description="Fetch a single task by id (CT-0001 or 0001). Returns the full task row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "pattern": "^CT-[0-9]{4,}$|^[0-9]+$"}}, "additionalProperties": True},
+            executor="builtin:coding.tasks.get", tags=["tasks", "code_corpus", "read"],
+            error_codes=["invalid_args", "not_found"]),
+        SkillSpec(id="coding.tasks.catalog", name="Coding tasks catalog filter",
+            description="Browse the 5,000-task catalog by domain / task_type / context_name. Returns id/domain/task_type/system/title/context_name (no embeddings).",
+            side_effect="read",
+            input_schema={"type": "object", "properties": {"domain": {"type": "string"}, "task_type": {"type": "string"}, "context_name": {"type": "string"}, "limit": {"type": "integer"}}, "additionalProperties": True},
+            executor="builtin:coding.tasks.catalog", tags=["tasks", "code_corpus", "catalog"],
+            error_codes=[]),
     ]
 
 
@@ -222,6 +249,7 @@ def wire_executors() -> None:
     from .clients import github_scenarios as ghs
     from .clients import scenarios as scn
     from .clients import coding_books_rag as cbr
+    from .clients import coding_tasks_corpus as ctc
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
@@ -249,6 +277,10 @@ def wire_executors() -> None:
         "builtin:coding.books.index": cbr.coding_books_index,
         "builtin:coding.books.search": cbr.coding_books_search,
         "builtin:coding.books.catalog": cbr.coding_books_catalog,
+        "builtin:coding.tasks.index": ctc.coding_tasks_index,
+        "builtin:coding.tasks.search": ctc.coding_tasks_search,
+        "builtin:coding.tasks.get": ctc.coding_tasks_get,
+        "builtin:coding.tasks.catalog": ctc.coding_tasks_catalog,
     })
 
 

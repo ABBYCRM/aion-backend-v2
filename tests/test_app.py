@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_25_contracts():
+def test_skills_bootstrap_seeds_29_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 25
+    assert info.get("seeded") == 29
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 25
+    assert result.data["count"] >= 29
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 25
+    assert body.get("count") >= 29
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -629,7 +629,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 25
+    assert body["data"]["count"] >= 29
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 25
+    assert body.get("seeded") == 29
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,17 +688,17 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 25
+    assert r2.json().get("seeded") == 29
 
 
 
 
-def test_scenario_bootstrap_seeds_25_contracts():
+def test_scenario_bootstrap_seeds_29_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 25
+    assert info.get("seeded") == 29
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
@@ -1170,11 +1170,11 @@ def test_aion_stack_skill_route_returns_real_rows():
     assert data["chosen"]["score"] >= 1.25
 
 
-def test_aion_stack_skill_routes_25_contracts():
+def test_aion_stack_skill_routes_29_contracts():
     """Bootstrap must seed 25 contracts (was 23, +aion_stack.scenario.match +stack.policy.match)."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 25
+    assert info.get("seeded") == 29
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "aion_stack.scenario.match" in ids
@@ -1190,6 +1190,122 @@ def test_aion_stack_unified_search_finds_layered_rows():
     assert any(p == "aion_stack" and l == "kernel" for p, l in packs_layers), (
         f"aion_stack/kernel rows not surfaced in unified search: {packs_layers[:5]}"
     )
+
+
+
+def test_coding_tasks_corpus_csv_loads_5000():
+    """The operator CSV must load 5,000 unique tasks across 25 domains."""
+    from app.skills.clients.coding_tasks_corpus import load_rows
+    rows = load_rows()
+    assert len(rows) == 5000
+    assert len(set(r["id"] for r in rows)) == 5000
+    domains = set(r["domain"] for r in rows)
+    assert len(domains) == 25
+    task_types = set(r["task_type"] for r in rows)
+    assert len(task_types) == 10
+    contexts = set(r["context_name"] for r in rows)
+    assert len(contexts) == 4
+    # Every row has a layer == code_corpus
+    assert all(r["layer"] == "code_corpus" for r in rows)
+
+
+def test_coding_tasks_search_idempotent_webhook():
+    """Operator-claimed: search 'idempotent webhook' returns CT-0081."""
+    from app.skills.clients.coding_tasks_corpus import local_search
+    hits = local_search("idempotent webhook", limit=3)
+    assert len(hits) >= 1
+    assert hits[0]["id"] == "CT-0081"
+    assert "idempotent" in hits[0]["title"].lower()
+    assert "webhook" in hits[0]["title"].lower()
+
+
+def test_coding_tasks_get_by_id():
+    """coding.tasks.get must return the full row for a valid id."""
+    from app.skills.clients.coding_tasks_corpus import load_rows
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap = __import__("app.skills", fromlist=["bootstrap"]).bootstrap
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.get", {"id": "0081"}))  # bare number
+    assert result.ok is True
+    assert result.data["task"]["id"] == "CT-0081"
+    # Full row has all 16 columns
+    task = result.data["task"]
+    for col in ("id", "domain", "task_type", "system", "title", "objective",
+                "context_name", "principal_risks", "edge_cases",
+                "required_validation", "completion_standard", "layer"):
+        assert col in task, f"missing column: {col}"
+
+
+def test_coding_tasks_catalog_filter():
+    """coding.tasks.catalog must filter by domain / task_type / context."""
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap = __import__("app.skills", fromlist=["bootstrap"]).bootstrap
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.catalog", {
+        "domain": "Web APIs", "limit": 10,
+    }))
+    assert result.ok is True
+    assert result.data["count"] == 10
+    assert all(t["domain"] == "Web APIs" for t in result.data["tasks"])
+
+
+def test_coding_tasks_index_upserts_5000():
+    """coding.tasks.index must upsert all 5,000 docs into coding_tasks."""
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap = __import__("app.skills", fromlist=["bootstrap"]).bootstrap
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.index", {}))
+    assert result.ok is True
+    assert result.data["upserted"] == 5000
+    assert result.data["collection"] == "coding_tasks"
+    assert result.data["errors"] == []
+
+
+def test_coding_tasks_search_via_skill_route():
+    """End-to-end via the skills/run endpoint contract."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.search", {
+        "query": "idempotent webhook", "limit": 2,
+    }))
+    assert result.ok is True
+    assert result.data["count"] >= 1
+    assert result.data["source"] == "csv_local"
+    assert result.data["hits"][0]["id"] == "CT-0081"
+
+
+def test_coding_tasks_unknown_id_returns_not_found():
+    """coding.tasks.get for a nonexistent id returns data.ok=false, error_code=not_found."""
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap = __import__("app.skills", fromlist=["bootstrap"]).bootstrap
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.get", {"id": "CT-9999"}))
+    # Skill executor returned ok=False inside the data payload; runner wraps it.
+    assert result.data.get("ok") is False
+    assert result.data.get("error_code") == "not_found"
+
+
+def test_coding_tasks_search_empty_query_returns_invalid_args():
+    """coding.tasks.search with no query returns data.ok=false, error_code=invalid_args."""
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap = __import__("app.skills", fromlist=["bootstrap"]).bootstrap
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("coding.tasks.search", {"query": ""}))
+    assert result.data.get("ok") is False
+    assert result.data.get("error_code") == "invalid_args"
 
 def test_search_provider_chain_wiring():
     """The module-level web_search must be a ChainedWebSearch wrapping both."""

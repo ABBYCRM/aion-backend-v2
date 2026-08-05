@@ -13,3 +13,4 @@ audit.jsonl
 .DS_Store
 
 !data/books/
+!data/tasks/
