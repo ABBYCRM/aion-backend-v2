@@ -205,6 +205,76 @@ def test_brain_status_reports_unreachable_when_brain_down(_vault_db, monkeypatch
     # expose_headers is verified at the live deploy.
 
 
+
+
+def test_kernel_defers_when_tool_errors():
+    """resolve_decision must DEFER when a tool was requested and errored."""
+    from app.kernel import resolve_decision, MissionContext, DecisionState
+    ctx = MissionContext(user_input="review this repo", history=[], metadata={"web_search": False, "github": True, "tool_context_available": False, "tool_errors": ["github_repository_not_allowed: ABBYCRM/robot-vacuum not on GITHUB_ALLOWED_REPOSITORIES"]})
+    d = resolve_decision(ctx)
+    assert d.state == DecisionState.DEFER
+    assert any(c.law == "EPISTEMIC" and not c.passed for c in d.checks)
+    assert "fail" in d.rationale.lower() or "error" in d.rationale.lower() or "evidence" in d.rationale.lower()
+
+
+def test_kernel_commits_when_no_tool_requested():
+    """A plain question (no /search / /github) still COMMITs."""
+    from app.kernel import resolve_decision, MissionContext, DecisionState
+    ctx = MissionContext(user_input="hi", history=[], metadata={"web_search": False, "github": False, "tool_context_available": False, "tool_errors": []})
+    d = resolve_decision(ctx)
+    assert d.state == DecisionState.COMMIT
+
+
+def test_system_prompt_surfaces_tool_errors():
+    """When a tool errored, the prompt must include a 'Tool errors' section
+    with the error text, and the no-filler rule."""
+    from app.kernel import build_system_prompt, Decision, LawCheck, DecisionState
+    decision = Decision(state=DecisionState.DEFER, score=0.2, rationale="tool failed", checks=[], protocol={})
+    p = build_system_prompt(decision, tool_context="", notes_context="", tool_errors=("github_repository_not_allowed: ABBYCRM/robot-vacuum not on GITHUB_ALLOWED_REPOSITORIES",))
+    assert "github_repository_not_allowed" in p
+    assert "Tool errors this turn" in p
+    assert "DO NOT substitute generic advice" in p
+    # A successful case must NOT include the section
+    decision_ok = Decision(state=DecisionState.COMMIT, score=0.9, rationale="ok", checks=[], protocol={})
+    p_ok = build_system_prompt(decision_ok, tool_context="", notes_context="", tool_errors=())
+    # Successful case must NOT have a "Tool errors" SECTION (rules may still
+    # mention "Tool errors" inside the quoted instruction).
+    assert "Tool errors this turn" not in p_ok
+
+
+def test_chat_defers_when_github_tool_blocked(_vault_db, monkeypatch):
+    """The same prompt that produced the soft-hallucination bug
+    (https://github.com/ABBYCRM/robot-vacuum ...) MUST now return
+    DEFER when GitHub is requested and errored.
+    """
+    monkeypatch.setenv("GITHUB_ALLOWED_REPOSITORIES", "ABBYCRM/aion-backend-v2")
+    import importlib
+    from app import settings, main as main_mod, tools as tools_mod
+    importlib.reload(settings)
+    importlib.reload(tools_mod)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    with client.stream(
+        "POST", "/api/chat",
+        headers=USER_HEADERS,
+        json={"messages": [{"role": "user", "content": "https://github.com/ABBYCRM/robot-vacuum what do you think of this repo"}], "max_tokens": 256},
+    ) as r:
+        assert r.status_code == 200
+        import json as _json
+        decision_state = None
+        tool_errors = []
+        for line in r.iter_lines():
+            if not line: continue
+            if isinstance(line, bytes): line = line.decode("utf-8", errors="ignore")
+            if line.startswith("data: "):
+                try: evt = _json.loads(line[6:])
+                except Exception: continue
+                if evt.get("type") == "decision": decision_state = evt.get("decision", {}).get("state")
+                elif evt.get("type") == "tool_error": tool_errors.append(evt)
+        assert decision_state == "DEFER", f"expected DEFER, got {decision_state}; tool_errors: {tool_errors}"
+        assert any("not allowlist" in (t.get("message", "").lower() + t.get("tool", "").lower()) or "github_repository_not_allowed" in t.get("message", "").lower() for t in tool_errors), f"expected not-allowlisted tool error, got: {tool_errors}"
+
+
 # ---------------------------------------------------------------------------
 # DuckDuckGo fallback search (no BRAVE_API_KEY required)
 # ---------------------------------------------------------------------------

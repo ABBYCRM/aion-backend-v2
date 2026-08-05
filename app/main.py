@@ -550,14 +550,18 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             tool_contexts.append(github.as_context(github_mode, repository, result)); tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
     mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
-    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "")
+    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "", tool_errors=tuple(tool_errors))
     model_messages = [{"role": "system", "content": system_prompt}, *({"role": message.role, "content": message.wire_content()} for message in body.messages)]
     model_messages = [model_messages[0], *model_messages[1:][-(settings.max_context_messages - 1):]]
     try: model_chain = await resolve_model_chain(body.provider, body.model)
     except InvalidModelSelection as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AllProvidersFailed as exc: return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "all_providers_failed"})
     audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository), "brain": brain_client.is_configured()})
-    use_brain = brain_client.is_configured() and not settings.brain_decision_only  # brain_decision_only means: use brain for /api/decision only, not /api/chat
+    # If a tool was requested and errored, the local kernel has decided
+    # DEFER. That decision is authoritative — Brain is the LLM router,
+    # not the tool-state oracle. Don't ask Brain to re-decide.
+    tool_state_forced_defer = bool(tool_errors) and bool(search_query or repository)
+    use_brain = brain_client.is_configured() and not settings.brain_decision_only and not tool_state_forced_defer  # brain_decision_only means: use brain for /api/decision only, not /api/chat
     # Probe Brain once to capture latency for the SSE brain event + the
     # X-AION-Brain-Latency-Ms response header. Done synchronously here so
     # the SSE brain event carries the right value; the chat stream itself
@@ -565,6 +569,10 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     brain_probe_at_decision: dict[str, Any] = {}
     if brain_client.is_configured():
         brain_probe_at_decision = await brain_client.probe_brain(timeout_seconds=2.0)
+    # Also surface tool errors to Brain's decision so it could DEFER too
+    # (currently we short-circuit above when tool_state_forced_defer, but
+    # this keeps Brain's audit trail honest).
+    brain_metadata_extras: dict[str, Any] = {"tool_errors": tool_errors} if tool_errors else {}
     async def events() -> AsyncIterator[bytes]:
         # Brain-link signal (BEFORE decision so the UI lights up first).
         if brain_client.is_configured():
