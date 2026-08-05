@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_29_contracts():
+def test_skills_bootstrap_seeds_34_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 29
+    assert info.get("seeded") == 34
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 29
+    assert result.data["count"] >= 34
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 29
+    assert body.get("count") >= 34
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -629,7 +629,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 29
+    assert body["data"]["count"] >= 34
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 29
+    assert body.get("seeded") == 34
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,17 +688,17 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 29
+    assert r2.json().get("seeded") == 34
 
 
 
 
-def test_scenario_bootstrap_seeds_29_contracts():
+def test_scenario_bootstrap_seeds_34_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 29
+    assert info.get("seeded") == 34
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
@@ -1170,11 +1170,11 @@ def test_aion_stack_skill_route_returns_real_rows():
     assert data["chosen"]["score"] >= 1.25
 
 
-def test_aion_stack_skill_routes_29_contracts():
+def test_aion_stack_skill_routes_34_contracts():
     """Bootstrap must seed 25 contracts (was 23, +aion_stack.scenario.match +stack.policy.match)."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 29
+    assert info.get("seeded") == 34
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "aion_stack.scenario.match" in ids
@@ -1306,6 +1306,202 @@ def test_coding_tasks_search_empty_query_returns_invalid_args():
     result = asyncio.run(r.run("coding.tasks.search", {"query": ""}))
     assert result.data.get("ok") is False
     assert result.data.get("error_code") == "invalid_args"
+
+
+
+def test_extra_scenarios_list_returns_29_languages():
+    """Operator-claimed: 29 languages x 100,000 scenarios = 2,900,000 total."""
+    from app.skills.clients.extra_scenarios import list_languages
+    langs = list_languages()
+    assert len(langs) == 29
+    assert sum(l["count"] for l in langs) == 2_900_000
+    # Every language has exactly 100,000 scenarios
+    for l in langs:
+        assert l["count"] == 100_000, f"{l['language']} has {l['count']} scenarios, expected 100,000"
+        assert l["size_bytes"] > 10_000_000  # each file is ~14 MB
+
+
+def test_extra_scenarios_list_via_skill_route():
+    """End-to-end via the skills/run endpoint contract."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.list", {}))
+    assert result.ok is True
+    assert result.data["language_count"] == 29
+    assert result.data["total_scenarios"] == 2_900_000
+
+
+def test_extra_scenarios_get_by_id():
+    """extra.scenarios.get returns a full row for a valid (language, id)."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("rust")
+    rec = loaded["by_id"]["000042"]
+    assert rec["id"] == "000042"
+    assert rec["language"] == "rust"
+    assert rec["technology"] == "Rust"
+    for col in ("domain", "concept", "action", "constraint", "failure"):
+        assert col in rec and rec[col], f"missing/empty column: {col}"
+
+
+def test_extra_scenarios_get_via_skill_route():
+    """End-to-end: extra.scenarios.get rust 000042 returns full row."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.get", {"language": "rust", "id": "000042"}))
+    assert result.ok is True
+    s = result.data["scenario"]
+    assert s["id"] == "000042"
+    assert s["language"] == "rust"
+
+
+def test_extra_scenarios_get_not_found():
+    """extra.scenarios.get for a missing id returns ok=false, error_code=not_found."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("python") if "python" in {l["language"] for l in __import__("app.skills.clients.extra_scenarios", fromlist=["list_languages"]).list_languages()} else _load_language("rust")
+    # Use a language we know exists
+    from app.skills.clients.extra_scenarios import _load_language as _ld
+    loaded = _ld("rust")
+    miss_id = "999999"
+    assert miss_id not in loaded["by_id"]
+    # Skill route
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    result = asyncio.run(get_runner().run("extra.scenarios.get", {"language": "rust", "id": miss_id}))
+    assert result.data.get("ok") is False
+    assert result.data.get("error_code") == "not_found"
+
+
+def test_extra_scenarios_get_unknown_language():
+    """Unknown language returns error_code=unknown_language:<slug>."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    result = asyncio.run(get_runner().run("extra.scenarios.get", {"language": "klingon", "id": "000001"}))
+    assert result.data.get("ok") is False
+    assert "unknown_language:klingon" in str(result.data.get("error_code", ""))
+
+
+def test_extra_scenarios_search_finds_exact_match():
+    """A multi-token query with min_score=5 should return the exact scenario."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("bash")
+    # 000001 is "identity | pipelines | design the component | low memory | handle timeouts"
+    q_tokens = {"design", "component", "low", "memory", "timeouts"}
+    found = [
+        rec for rec in loaded["ordered"]
+        if len(q_tokens & rec["_blob_tokens"]) == 5
+    ]
+    assert any(r["id"] == "000001" for r in found), "000001 should match all 5 tokens"
+
+
+def test_extra_scenarios_search_via_skill_route():
+    """End-to-end search returns ranked hits with score."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.search", {
+        "language": "bash", "query": "design the component low memory timeouts",
+        "min_score": 5, "limit": 3,
+    }))
+    assert result.ok is True
+    assert result.data["count"] >= 1
+    assert result.data["hits"][0]["score"] == 5
+    assert result.data["language"] == "bash"
+
+
+def test_extra_scenarios_random_with_seed_is_deterministic():
+    """Same seed -> same sample."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("go")
+    import random
+    a = sorted(random.Random(42).sample(loaded["ordered"], k=5), key=lambda r: r["id"])
+    b = sorted(random.Random(42).sample(loaded["ordered"], k=5), key=lambda r: r["id"])
+    assert [r["id"] for r in a] == [r["id"] for r in b]
+
+
+def test_extra_scenarios_random_via_skill_route():
+    """End-to-end random sample returns N scenarios."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.random", {"language": "go", "n": 5, "seed": 42}))
+    assert result.ok is True
+    assert result.data["n"] == 5
+    assert len(result.data["scenarios"]) == 5
+    assert all(s["language"] == "go" for s in result.data["scenarios"])
+
+
+def test_extra_scenarios_browse_pagination():
+    """browse paginates within one language; offset/limit respected."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("sql")
+    page1 = loaded["ordered"][:5]
+    page2 = loaded["ordered"][5:10]
+    assert page1 != page2
+    # The IDs are stable
+    for rec in page1 + page2:
+        assert rec["language"] == "sql"
+
+
+def test_extra_scenarios_browse_with_concept_filter():
+    """browse filters by concept substring."""
+    from app.skills.clients.extra_scenarios import _load_language
+    loaded = _load_language("sql")
+    indexes_rows = [r for r in loaded["ordered"] if "index" in r["concept"].lower()]
+    assert len(indexes_rows) > 0
+    for r in indexes_rows:
+        assert "index" in r["concept"].lower()
+
+
+def test_extra_scenarios_browse_via_skill_route():
+    """End-to-end browse with concept filter returns matching rows."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.browse", {
+        "language": "sql", "concept": "indexes", "limit": 5,
+    }))
+    assert result.ok is True
+    assert result.data["count"] == 5
+    assert all("index" in s["concept"].lower() for s in result.data["scenarios"])
+    assert result.data["total_after_filter"] > 5
+
+
+def test_extra_scenarios_search_empty_query_returns_invalid_args():
+    """Search with empty query returns error_code=invalid_args."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("extra.scenarios.search", {"language": "rust", "query": ""}))
+    assert result.data.get("ok") is False
+    assert result.data.get("error_code") == "invalid_args"
+
+
+def test_extra_scenarios_lazy_load_only_loaded_languages():
+    """The cache must only contain the languages actually loaded."""
+    from app.skills.clients.extra_scenarios import _CACHE, reset_cache
+    reset_cache()
+    from app.skills.clients.extra_scenarios import _load_language
+    _load_language("rust")
+    _load_language("go")
+    assert set(_CACHE.keys()) == {"rust", "go"}, f"expected only rust+go, got {set(_CACHE.keys())}"
 
 def test_search_provider_chain_wiring():
     """The module-level web_search must be a ChainedWebSearch wrapping both."""

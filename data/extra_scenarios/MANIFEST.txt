@@ -1,0 +1,35 @@
+Bundle: 100k_scenarios_additional_29
+Generated UTC: 2026-08-05T06:20:28.218450+00:00
+Files: 29
+Total scenarios: 2,900,000
+Validation: exact count and full-line uniqueness checked for every file.
+
+C Sharp | c_sharp_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14405100 | ids=000001..100000 | sha256=6fccd610c0cc2383f1e4fb2a42ec849c53292354c4021fd5422dd5e7d9bf60c1
+Go | go_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14465095 | ids=000001..100000 | sha256=db96fac27d28a6e8050824c3c07d704c0ceb07e18d4e279740b0aa3ee1a8b088
+Rust | rust_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=13985097 | ids=000001..100000 | sha256=7713bb0280bb28f989a9b0787b25853ad4ab51ca064e124c55ca620fcdf33878
+PHP | php_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14325096 | ids=000001..100000 | sha256=330c36595fab79770c90345e7724cd4bde57aaa7e6b0c6ebecea708a359c5b31
+Ruby | ruby_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14175097 | ids=000001..100000 | sha256=f4f875f86fbd8b383dc19328f9c9729f5d215941646e8c97816500ab75411831
+Swift | swift_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14385098 | ids=000001..100000 | sha256=22a9c9266c7346b048b65d967459da5d896720022dfeaa1e70771fa9fb2775e2
+Kotlin | kotlin_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14415099 | ids=000001..100000 | sha256=da1c83996bce55c9f8029d7845ba24e0d1c041c22db04dbf86229ce263daf577
+SQL | sql_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14155096 | ids=000001..100000 | sha256=a345e634ec6065a0daf38f9e17417d7ef55c31a2001761699726cc450626216d
+Bash | bash_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14355097 | ids=000001..100000 | sha256=5c149f9064dc319f553e0eb9a77e6e8b693e3d6a9cb8d7ee89bc813d148845ef
+PowerShell | powershell_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14545103 | ids=000001..100000 | sha256=9a1e9be5dba5ca6cc37f2e1803147e97389b9d8febe0c4c47adc70ee36eda3eb
+R | r_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14625094 | ids=000001..100000 | sha256=13813b3e375a9a7a3b3a825c593cd69ef284270a8b8af7c40d06ebcaf94160a5
+Dart | dart_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14095097 | ids=000001..100000 | sha256=8a427dbefad2751ee6342cd0d84adf30ac2484fa40a36f2a3ef93961a9e4650d
+Scala | scala_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14315098 | ids=000001..100000 | sha256=544a322f48c67cf7d8f8890e483afe383aacfc96ecb43f2726a5cd856578b028
+Lua | lua_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14095096 | ids=000001..100000 | sha256=16a4bd4365d7fc6eccee92f586ee9850124b1fc6c43ca5b469cbfc6d2e646c27
+Perl | perl_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14245097 | ids=000001..100000 | sha256=859aa506bec492e0e5d5f54a255bf69f2442836eb1e01558468795a6ef71a3d9
+MATLAB | matlab_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14475099 | ids=000001..100000 | sha256=1740455cbc5bcb3c22ed29f7d4dc5f3e5ded3618de39dfbcecfce0c3a08ee7ac
+Objective-C | objective-c_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14205104 | ids=000001..100000 | sha256=c3b9e28c148bbde32d71399bb2c36ba6d2edfbb77d8f1528e9e3dff1067726a1
+Haskell | haskell_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14225100 | ids=000001..100000 | sha256=ad84fb3c641dd4c614300e64d2337a501408804b86bf20a779a812da36968834
+Elixir | elixir_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14445099 | ids=000001..100000 | sha256=15254b974d9cffb3c72617c09f79e7c17467f3e0e8d4282c82c799acb677b534
+Clojure | clojure_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14225100 | ids=000001..100000 | sha256=9e93af279754fa15bf1f9eeace1614ca0391e265da25df73b65da6bfdc7835d1
+Julia | julia_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14525098 | ids=000001..100000 | sha256=cb042c49597ed0988ce087313ef11a45a05071c74a280f51f76a788246bcb6f1
+Solidity | solidity_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14465101 | ids=000001..100000 | sha256=1cb848689c9bd8481379e397afb0b5596cb689555c219eba0ed2214c3feaea00
+Assembly | assembly_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14415101 | ids=000001..100000 | sha256=f36276c9f1b82edea27033169cdacafaaf2f743263e8d1af6ef17d51c3a585cf
+F Sharp | f_sharp_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14755100 | ids=000001..100000 | sha256=5122a156e32c81c8f509dcba6807f19e91c31e72bdf52d67edf6a12dab54b9dc
+Fortran | fortran_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14355100 | ids=000001..100000 | sha256=ef737d011ec44b45618f12fd7c7e2bf40ddc93dc2e73147dbb0a57a093dc293d
+COBOL | cobol_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14625098 | ids=000001..100000 | sha256=8218a94ac11d6af28210488704a144b3c4a60c315af5cefb5228af2c8bf658b4
+Erlang | erlang_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14375099 | ids=000001..100000 | sha256=0fc94831e53d8b257d40126e1c4e1838bd0c6ce88962142c459bae94436929f6
+OCaml | ocaml_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14365098 | ids=000001..100000 | sha256=a6cbca690f6529cac15d45a5a74618d230eff78e5b001de68664fb4123a7d7c1
+Zig | zig_100k_scenarios.txt | scenarios=100000 | unique=100000 | bytes=14255096 | ids=000001..100000 | sha256=36edecda6762406a3d29daafecc13c26a5a987f084c6a649b4ab12ab33ec205a

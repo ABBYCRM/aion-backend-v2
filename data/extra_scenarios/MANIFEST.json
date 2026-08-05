@@ -1,0 +1,302 @@
+{
+  "bundle": "100k_scenarios_additional_29",
+  "generated_utc": "2026-08-05T06:20:28.218697+00:00",
+  "files": [
+    {
+      "technology": "C Sharp",
+      "file": "c_sharp_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14405100,
+      "sha256": "6fccd610c0cc2383f1e4fb2a42ec849c53292354c4021fd5422dd5e7d9bf60c1",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Go",
+      "file": "go_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14465095,
+      "sha256": "db96fac27d28a6e8050824c3c07d704c0ceb07e18d4e279740b0aa3ee1a8b088",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Rust",
+      "file": "rust_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 13985097,
+      "sha256": "7713bb0280bb28f989a9b0787b25853ad4ab51ca064e124c55ca620fcdf33878",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "PHP",
+      "file": "php_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14325096,
+      "sha256": "330c36595fab79770c90345e7724cd4bde57aaa7e6b0c6ebecea708a359c5b31",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Ruby",
+      "file": "ruby_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14175097,
+      "sha256": "f4f875f86fbd8b383dc19328f9c9729f5d215941646e8c97816500ab75411831",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Swift",
+      "file": "swift_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14385098,
+      "sha256": "22a9c9266c7346b048b65d967459da5d896720022dfeaa1e70771fa9fb2775e2",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Kotlin",
+      "file": "kotlin_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14415099,
+      "sha256": "da1c83996bce55c9f8029d7845ba24e0d1c041c22db04dbf86229ce263daf577",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "SQL",
+      "file": "sql_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14155096,
+      "sha256": "a345e634ec6065a0daf38f9e17417d7ef55c31a2001761699726cc450626216d",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Bash",
+      "file": "bash_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14355097,
+      "sha256": "5c149f9064dc319f553e0eb9a77e6e8b693e3d6a9cb8d7ee89bc813d148845ef",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "PowerShell",
+      "file": "powershell_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14545103,
+      "sha256": "9a1e9be5dba5ca6cc37f2e1803147e97389b9d8febe0c4c47adc70ee36eda3eb",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "R",
+      "file": "r_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14625094,
+      "sha256": "13813b3e375a9a7a3b3a825c593cd69ef284270a8b8af7c40d06ebcaf94160a5",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Dart",
+      "file": "dart_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14095097,
+      "sha256": "8a427dbefad2751ee6342cd0d84adf30ac2484fa40a36f2a3ef93961a9e4650d",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Scala",
+      "file": "scala_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14315098,
+      "sha256": "544a322f48c67cf7d8f8890e483afe383aacfc96ecb43f2726a5cd856578b028",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Lua",
+      "file": "lua_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14095096,
+      "sha256": "16a4bd4365d7fc6eccee92f586ee9850124b1fc6c43ca5b469cbfc6d2e646c27",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Perl",
+      "file": "perl_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14245097,
+      "sha256": "859aa506bec492e0e5d5f54a255bf69f2442836eb1e01558468795a6ef71a3d9",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "MATLAB",
+      "file": "matlab_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14475099,
+      "sha256": "1740455cbc5bcb3c22ed29f7d4dc5f3e5ded3618de39dfbcecfce0c3a08ee7ac",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Objective-C",
+      "file": "objective-c_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14205104,
+      "sha256": "c3b9e28c148bbde32d71399bb2c36ba6d2edfbb77d8f1528e9e3dff1067726a1",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Haskell",
+      "file": "haskell_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14225100,
+      "sha256": "ad84fb3c641dd4c614300e64d2337a501408804b86bf20a779a812da36968834",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Elixir",
+      "file": "elixir_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14445099,
+      "sha256": "15254b974d9cffb3c72617c09f79e7c17467f3e0e8d4282c82c799acb677b534",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Clojure",
+      "file": "clojure_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14225100,
+      "sha256": "9e93af279754fa15bf1f9eeace1614ca0391e265da25df73b65da6bfdc7835d1",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Julia",
+      "file": "julia_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14525098,
+      "sha256": "cb042c49597ed0988ce087313ef11a45a05071c74a280f51f76a788246bcb6f1",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Solidity",
+      "file": "solidity_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14465101,
+      "sha256": "1cb848689c9bd8481379e397afb0b5596cb689555c219eba0ed2214c3feaea00",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Assembly",
+      "file": "assembly_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14415101,
+      "sha256": "f36276c9f1b82edea27033169cdacafaaf2f743263e8d1af6ef17d51c3a585cf",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "F Sharp",
+      "file": "f_sharp_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14755100,
+      "sha256": "5122a156e32c81c8f509dcba6807f19e91c31e72bdf52d67edf6a12dab54b9dc",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Fortran",
+      "file": "fortran_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14355100,
+      "sha256": "ef737d011ec44b45618f12fd7c7e2bf40ddc93dc2e73147dbb0a57a093dc293d",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "COBOL",
+      "file": "cobol_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14625098,
+      "sha256": "8218a94ac11d6af28210488704a144b3c4a60c315af5cefb5228af2c8bf658b4",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Erlang",
+      "file": "erlang_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14375099,
+      "sha256": "0fc94831e53d8b257d40126e1c4e1838bd0c6ce88962142c459bae94436929f6",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "OCaml",
+      "file": "ocaml_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14365098,
+      "sha256": "a6cbca690f6529cac15d45a5a74618d230eff78e5b001de68664fb4123a7d7c1",
+      "first_id": "000001",
+      "last_id": "100000"
+    },
+    {
+      "technology": "Zig",
+      "file": "zig_100k_scenarios.txt",
+      "scenario_count": 100000,
+      "unique_scenarios": 100000,
+      "bytes": 14255096,
+      "sha256": "36edecda6762406a3d29daafecc13c26a5a987f084c6a649b4ab12ab33ec205a",
+      "first_id": "000001",
+      "last_id": "100000"
+    }
+  ],
+  "total_scenarios": 2900000,
+  "validation": {
+    "exact_scenario_count_per_file": true,
+    "full_line_uniqueness_per_file": true,
+    "zip_crc_test": "performed after archive creation"
+  }
+}
