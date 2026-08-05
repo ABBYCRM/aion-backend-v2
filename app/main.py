@@ -356,22 +356,40 @@ async def skills_debug_scenarios(_: Principal = Depends(authenticated)):
     """Operator-only debug: print resolved path + file existence for
     github_scenarios.csv. Never returns secret values."""
     try:
-        from .skills.clients.scenarios import _resolve_scenarios_dir as resolve_csv_path
+        from .skills.clients.scenario_store import resolve_scenarios_dir
         candidates = []
         env_override = os.environ.get("AION_GITHUB_SCENARIOS_CSV")
         if env_override:
             candidates.append({"path": env_override, "exists": os.path.exists(env_override)})
         data_dir = os.environ.get("AION_DATA_DIR")
         if data_dir:
-            p = os.path.join(data_dir, "github_scenarios.csv")
+            # Forensic P1#7: read both the root-level file (now a symlink
+            # to data/scenarios/github_scenarios.csv) and the canonical copy.
+            p1 = os.path.join(data_dir, "github_scenarios.csv")
+            candidates.append({"path": p1, "exists": os.path.exists(p1)})
+            p2 = os.path.join(data_dir, "scenarios", "github_scenarios.csv")
+            candidates.append({"path": p2, "exists": os.path.exists(p2)})
+        for p in [
+            "/app/data/github_scenarios.csv",
+            "/app/data/scenarios/github_scenarios.csv",
+            "./data/github_scenarios.csv",
+            "./data/scenarios/github_scenarios.csv",
+        ]:
             candidates.append({"path": p, "exists": os.path.exists(p)})
-        for p in ["/app/data/github_scenarios.csv", "./data/github_scenarios.csv"]:
-            candidates.append({"path": p, "exists": os.path.exists(p)})
-        resolved = resolve_csv_path()
+        resolved_dir = resolve_scenarios_dir()
+        resolved_path = str(resolved_dir / "github_scenarios.csv")
+        # If resolved_path is a symlink, also report the realpath so the
+        # operator knows what the scenario_store actually loads.
+        if os.path.islink(resolved_path):
+            real_path = os.path.realpath(resolved_path)
+        else:
+            real_path = resolved_path
         return {
             "ok": True,
-            "resolved_path": resolved,
-            "resolved_exists": os.path.exists(resolved),
+            "resolved_path": resolved_path,
+            "resolved_realpath": real_path,
+            "resolved_exists": os.path.exists(resolved_path),
+            "resolved_dir": str(resolved_dir),
             "candidates": candidates,
             "AION_DATA_DIR": os.environ.get("AION_DATA_DIR"),
             "AION_GITHUB_SCENARIOS_CSV": os.environ.get("AION_GITHUB_SCENARIOS_CSV"),
