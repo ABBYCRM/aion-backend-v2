@@ -340,8 +340,12 @@ class ScenarioStore:
                 continue
             if service and r.service and r.service != service:
                 continue
-            if layer and r.layer and r.layer != layer.lower():
-                continue
+            # Layer filter: when a layer is requested, drop rows with no
+            # layer (the 5 domain packs) — only aion_stack rows have
+            # non-empty layer. Also drop rows whose layer doesn't match.
+            if layer:
+                if not r.layer or r.layer != layer.lower():
+                    continue
             if min_sev is not None:
                 if sev_order.get(r.severity, 1) < min_sev:
                     continue

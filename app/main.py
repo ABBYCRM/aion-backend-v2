@@ -1001,7 +1001,10 @@ async def gallery_raw(item_id: str, principal: Principal = Depends(authenticated
     """Stream the raw bytes (image/png or video/mp4) for a gallery item. Owner-scoped."""
     item = gallery.get(item_id)
     if item is None or item.owner != principal.subject: raise HTTPException(status_code=404, detail="item_not_found")
-    data = gallery.get_data(item_id)
+    # get() already attached the binary on `item._data` — use it
+    # instead of re-querying the DB via get_data(). Falls back to
+    # get_data() only if the cache was somehow lost.
+    data = getattr(item, "_data", None) or gallery.get_data(item_id)
     if data is None: raise HTTPException(status_code=404, detail="data_not_found")
     from fastapi.responses import Response
     return Response(content=data, media_type=item.mime, headers={"Cache-Control": "private, max-age=300", "X-AION-Filename": item.filename, "Content-Disposition": f'inline; filename="{item.filename}"'})
