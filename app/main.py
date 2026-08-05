@@ -669,18 +669,12 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             tool_events.append({"type": "tool", "tool": "web_search", "query": search_query, "results": [result.__dict__ for result in results]})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
     repository, github_mode, github_argument = _github_request(body, user_text)
-    # Intent-routing: if the user turn is github-intent (github.com, "search github",
-    # "find repos for X") and no explicit /github command was parsed, treat the
-    # rest of the turn as a github.search query. This is what the user actually
-    # meant when they wrote "/search github.com for agentic software".
-    if not repository and _is_github_intent(user_text):
-        # Extract the search terms: drop the github trigger words.
-        terms = _GITHUB_INTENT_RE.sub(" ", user_text)
-        terms = re.sub(r"\s+", " ", terms).strip()
-        if terms and (settings.github_token or settings.github_app_configured):
-            repository = "_search_only_"
-            github_mode = "search"
-            github_argument = terms[:200]
+    # Intent-routing removed: github.search is per-repo code search and
+    # cannot do global topic search like "find repos about X". The site:github.com
+    # web search (Phase 1) is the right path for those queries. The github tool
+    # only fires when the user explicitly typed /github owner/repo ... (handled
+    # by _github_request above) or when a github_repository field is set in the
+    # ChatRequest body.
     if repository:
         try:
             if github_mode == "file" and github_argument: result = await github.get_file(repository, github_argument)
