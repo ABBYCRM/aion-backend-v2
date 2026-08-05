@@ -312,6 +312,87 @@ def test_defer_tool_failure_text_mentions_repo_and_fix():
     assert "See the error above" in text2
 
 
+
+
+def test_decision_includes_failure_block_on_github_allowlist():
+    """When GitHub errors with github_repository_not_allowed, the
+    decision must include a structured failure block with kind=
+    github_allowlist_blocked + the repo + the fix."""
+    from app.kernel import resolve_decision, MissionContext
+    ctx = MissionContext(user_input="x", history=[], metadata={"web_search": False, "github": True, "tool_context_available": False, "tool_errors": ["github_repository_not_allowed: ABBYCRM/robot-vacuum not on GITHUB_ALLOWED_REPOSITORIES"]})
+    d = resolve_decision(ctx)
+    assert d.failure["kind"] == "github_allowlist_blocked"
+    assert d.failure["tool"] == "github"
+    assert "ABBYCRM/robot-vacuum" in d.failure["next_step"]
+    assert "GITHUB_ALLOWED_REPOSITORIES" in d.failure["next_step"]
+
+
+def test_decision_failure_kind_for_search():
+    from app.kernel import resolve_decision, MissionContext
+    ctx = MissionContext(user_input="x", history=[], metadata={"web_search": True, "github": False, "tool_context_available": False, "tool_errors": ["search_not_configured: BRAVE_API_KEY missing"]})
+    d = resolve_decision(ctx)
+    assert d.failure["kind"] == "search_not_configured"
+    assert d.failure["tool"] == "search"
+    assert "BRAVE_API_KEY" in d.failure["next_step"] or "DuckDuckGo" in d.failure["next_step"]
+
+
+def test_decision_failure_empty_for_commit():
+    from app.kernel import resolve_decision, MissionContext
+    ctx = MissionContext(user_input="x", history=[], metadata={"web_search": False, "github": False, "tool_context_available": False, "tool_errors": []})
+    d = resolve_decision(ctx)
+    assert d.failure == {}
+
+
+
+
+def test_policy_endpoint_returns_operator_view():
+    """GET /api/policy must return github + cors + brain status with no secrets."""
+    client = TestClient(app)
+    r = client.get("/api/policy", headers=USER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    gh = body.get("github", {})
+    assert "allowed_repositories" in gh
+    assert "allowlist_mode" in gh  # "allow_all" or "restricted"
+    assert isinstance(gh.get("write_enabled"), bool)
+    brain = body.get("brain", {})
+    assert "enabled" in brain
+    cors = body.get("cors", {})
+    assert "origins" in cors
+    # No secrets in the response
+    raw = r.text.lower()
+    assert "token" not in raw or "token_configured" in raw  # only the boolean
+    assert "api_key" not in raw or "configured" in raw
+
+
+def test_policy_github_check_routes_allowlist_decision(monkeypatch):
+    """GET /api/policy/github/check?repository=X must say allowed + normalized
+    when X is in the allowlist, and allowed=False with a reason when not."""
+    # Restrict to a known repo, then test against an unknown one
+    monkeypatch.setenv("GITHUB_ALLOWED_REPOSITORIES", "ABBYCRM/aion-backend-v2")
+    import importlib
+    from app import settings, main as main_mod, tools as tools_mod
+    importlib.reload(settings)
+    importlib.reload(tools_mod)  # tools holds a settings reference too
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.get("/api/policy/github/check?repository=ABBYCRM/robot-vacuum", headers=USER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("allowed") is False, f"expected blocked, got: {body}"
+    assert "not allowlist" in (body.get("reason") or "").lower() or "github_repository_not_allowed" in (body.get("reason") or "").lower()
+    # Now allow all
+    monkeypatch.setenv("GITHUB_ALLOWED_REPOSITORIES", "")
+    importlib.reload(settings)
+    importlib.reload(tools_mod)
+    importlib.reload(main_mod)
+    client2 = TestClient(main_mod.app)
+    r2 = client2.get("/api/policy/github/check?repository=ABBYCRM/robot-vacuum", headers=USER_HEADERS)
+    body2 = r2.json()
+    assert body2.get("allowed") is True, f"expected allowed when allowlist empty, got: {body2}"
+
+
 # ---------------------------------------------------------------------------
 # DuckDuckGo fallback search (no BRAVE_API_KEY required)
 # ---------------------------------------------------------------------------

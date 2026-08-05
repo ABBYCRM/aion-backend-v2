@@ -35,6 +35,10 @@ class Decision:
     checks: list[LawCheck] = field(default_factory=list)
     protocol: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: f"dec_{uuid.uuid4().hex[:12]}")
+    # Structured failure explanation. Only set when state is DEFER or
+    # REJECT and the reason is a tool or evidence gap. UI uses this to
+    # show "why this decision" without parsing rationale text.
+    failure: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self); value["state"] = self.state.value; return value
@@ -76,9 +80,32 @@ def resolve_decision(ctx: MissionContext) -> Decision:
         LawCheck("PERPETUITY", True, "response and tool evidence can be exported"),
         LawCheck("DECISION", True, "the turn resolves to an actionable response state"),
     ]
+    failure: dict[str, Any] = {}
     if tool_requested and not evidence_available and tool_failed:
+        # Classify the tool failure so the UI can give a precise "why".
+        joined = " | ".join(tool_errors).lower()
+        if "github_repository_not_allowed" in joined:
+            kind = "github_allowlist_blocked"
+        elif "github_not_configured" in joined:
+            kind = "github_not_configured"
+        elif "github_http" in joined:
+            kind = "github_http_error"
+        elif "not_configured" in joined:
+            kind = "search_not_configured"
+        elif "search_http" in joined:
+            kind = "search_http_error"
+        else:
+            kind = "tool_failure"
+        which = "github" if "github" in joined else ("search" if "search" in joined else "tool")
+        failure = {
+            "kind": kind,
+            "tool": which,
+            "errors": list(tool_errors),
+            "next_step": _next_step_for(kind, tool_errors),
+        }
         state = DecisionState.DEFER; score = 0.2; rationale = "A requested external tool failed; the kernel refuses to invent an analysis shape without the evidence. State the failure, name the resource, and ask for the missing evidence."
     elif tool_requested and not evidence_available:
+        failure = {"kind": "tool_missing_evidence", "tool": "github" if ctx.metadata.get("github") else "search", "errors": [], "next_step": "Check the tool configuration: token present? allowlist set? network reachable?"}
         state = DecisionState.DEFER; score = 0.25; rationale = "A requested external tool is not configured or returned no usable evidence."
     else:
         state = DecisionState.COMMIT; score = 0.9 if evidence_available else 0.75; rationale = "Validated request can be answered with the available context."
@@ -88,7 +115,32 @@ def resolve_decision(ctx: MissionContext) -> Decision:
         "leverage_detection": bool(tool_requested), "reversibility_check": True,
         "evidence_strength": "external" if evidence_available else "conversation_only", "downstream_consequences": "user_visible_reply",
     }
-    return Decision(state=state, score=score, rationale=rationale, checks=checks, protocol=protocol)
+    return Decision(state=state, score=score, rationale=rationale, checks=checks, protocol=protocol, failure=failure)
+
+
+
+
+def _next_step_for(kind: str, errors: list[str]) -> str:
+    """Operator-facing remediation hint for a given failure kind."""
+    if kind == "github_allowlist_blocked":
+        # Find the repo that was requested (best-effort parse).
+        import re as _re
+        repo = ""
+        for e in errors:
+            m = _re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", e)
+            if m: repo = m.group(1); break
+        if repo:
+            return f"Add `{repo}` to GITHUB_ALLOWED_REPOSITORIES, or paste the README / file tree here."
+        return "Add the repository to GITHUB_ALLOWED_REPOSITORIES, or paste the README / file tree here."
+    if kind == "github_not_configured":
+        return "Configure GITHUB_TOKEN (or GITHUB_APP_ID + GITHUB_PRIVATE_KEY + GITHUB_INSTALLATION_ID) on the backend."
+    if kind == "github_http_error":
+        return "Check the GitHub token permissions, repo visibility, and GitHub status (status.github.com)."
+    if kind == "search_not_configured":
+        return "Configure BRAVE_API_KEY or TAVILY_API_KEY on the backend, or rely on the DuckDuckGo fallback."
+    if kind == "search_http_error":
+        return "Check the search provider's API key + status page."
+    return "See the tool errors above for the cause."
 
 
 AION_CONTINUITY_PACK: dict[str, Any] = {

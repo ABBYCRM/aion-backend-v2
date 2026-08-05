@@ -172,6 +172,49 @@ async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = 
 
 
 # ===========================================================================
+# Policy transparency — operator-visible allowlist, CORS, Brain, env summary
+# ===========================================================================
+
+@app.get("/api/policy")
+async def policy(_: Principal = Depends(authenticated)):
+    """Read-only policy surface so operators can see *what* is configured
+    without guessing. Authenticated; no admin required to view (no secrets)."""
+    return {
+        "ok": True,
+        "github": {
+            "token_configured": bool(settings.github_token),
+            "app_configured": settings.github_app_configured,
+            "allowed_repositories": list(settings.github_allowed_repositories),
+            "allowlist_mode": "allow_all" if not settings.github_allowed_repositories else "restricted",
+            "write_enabled": settings.github_write_enabled,
+        },
+        "cors": {
+            "origins": list(settings.cors_origins),
+        },
+        "brain": {
+            "enabled": brain_client.is_configured(),
+            "url": settings.brain_url or None,
+        },
+        "environment": settings.environment,
+        "app_version": settings.app_version,
+    }
+
+
+@app.get("/api/policy/github/check")
+async def policy_github_check(repository: str, _: Principal = Depends(authenticated)):
+    """Tell the operator whether a given repo would be allowed right now.
+    Useful for 'why is this blocked?' debugging without a real chat."""
+    from .tools import github
+    try:
+        normalized = github.parse_repository(repository)
+        return {"ok": True, "requested": repository, "normalized": normalized, "allowed": True}
+    except ToolRequestError as exc:
+        return {"ok": True, "requested": repository, "normalized": None, "allowed": False, "reason": str(exc)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ===========================================================================
 # Brain-link visual signal — AION <-> Aion-Brain topbar + per-message badge
 # ===========================================================================
 
