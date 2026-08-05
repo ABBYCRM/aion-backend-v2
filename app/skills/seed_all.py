@@ -1,4 +1,18 @@
-"""Seed full skill catalog + wire all executors."""
+"""Seed the skill registry with the full 20-skill pack on AION boot.
+
+The 12 original skills are the v1 full pack (web search, github,
+scrape, email, RAG, catalog). The 8 new skills are the operator's
+scenario policy library:
+  - github.scenario.match / github.scenario.index
+  - openclaw.scenario.match
+  - composio.scenario.match
+  - firecrawl_steel.scenario.match
+  - render.scenario.match
+  - scenario.match  (unified, all 5 packs at once)
+  - scenario.index  (RAG indexer, 1 pack or all)
+
+Total: 20 contracts on boot.
+"""
 from __future__ import annotations
 
 from .registry_core import SkillSpec, get_registry
@@ -12,204 +26,179 @@ from .rag import skills_rag as rag
 
 def all_specs() -> list[SkillSpec]:
     return [
-        SkillSpec(
-            id="web.search",
-            name="Web search",
-            description="Search via Tavily or Exa (env).",
+        SkillSpec(id="web.search", name="Web search",
+            description="Search the web via Tavily, Exa, or DDG fallback. Returns ranked results.",
             side_effect="network",
-            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "count": {"type": "integer"}}},
-            executor="builtin:web.search",
-            tags=["search"],
-            error_codes=["web_search_not_configured", "web_search_http_error", "invalid_args"],
-        ),
-        SkillSpec(
-            id="github.repo",
-            name="GitHub repo",
-            description="Fetch allowlisted repository metadata.",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
+            executor="builtin:web.search", tags=["search", "network"],
+            error_codes=["web_search_not_configured", "web_search_http_error"]),
+        SkillSpec(id="github.repo", name="GitHub repo info",
+            description="Fetch repository metadata (stars, language, license, default_branch).",
             side_effect="network",
             input_schema={"type": "object", "required": ["repository"], "properties": {"repository": {"type": "string"}}},
-            executor="builtin:github.repo",
-            tags=["github"],
-            error_codes=["github_not_configured", "github_repository_not_allowed", "github_http_error", "invalid_github_repository"],
-        ),
-        SkillSpec(
-            id="github.file",
-            name="GitHub file",
-            description="Read file from allowlisted repo.",
+            executor="builtin:github.repo", tags=["github", "network"],
+            error_codes=["github_not_configured", "github_http_error", "github_repository_not_allowed"]),
+        SkillSpec(id="github.file", name="GitHub file content",
+            description="Fetch a file from a repository. Returns raw text or base64 for binaries.",
             side_effect="network",
             input_schema={"type": "object", "required": ["repository", "path"], "properties": {"repository": {"type": "string"}, "path": {"type": "string"}, "ref": {"type": "string"}}},
-            executor="builtin:github.file",
-            tags=["github"],
-            error_codes=["github_not_configured", "github_repository_not_allowed", "github_not_found"],
-        ),
-        SkillSpec(
-            id="github.issues",
-            name="GitHub issues",
-            description="List open issues.",
+            executor="builtin:github.file", tags=["github", "network"],
+            error_codes=["github_not_configured", "github_http_error", "github_repository_not_allowed"]),
+        SkillSpec(id="github.issues", name="GitHub issues list",
+            description="List open issues for a repository.",
             side_effect="network",
-            input_schema={"type": "object", "required": ["repository"], "properties": {"repository": {"type": "string"}}},
-            executor="builtin:github.issues",
-            tags=["github"],
-            error_codes=["github_not_configured", "github_repository_not_allowed"],
-        ),
-        SkillSpec(
-            id="github.search",
-            name="GitHub code search",
-            description="Search code in allowlisted repo.",
+            input_schema={"type": "object", "required": ["repository"], "properties": {"repository": {"type": "string"}, "state": {"type": "string"}}},
+            executor="builtin:github.issues", tags=["github", "network"],
+            error_codes=["github_not_configured", "github_http_error", "github_repository_not_allowed"]),
+        SkillSpec(id="github.search", name="GitHub code search",
+            description="Search code/issues in a single repository via the GitHub Search API.",
             side_effect="network",
-            input_schema={"type": "object", "required": ["repository", "query"], "properties": {"repository": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}},
-            executor="builtin:github.search",
-            tags=["github"],
-            error_codes=["github_not_configured", "github_repository_not_allowed"],
-        ),
-        SkillSpec(
-            id="scrape.url",
-            name="Scrape URL",
-            description="Scrape page via Firecrawl/ScrapingBee/Scrapfly.",
+            input_schema={"type": "object", "required": ["repository", "query"], "properties": {"repository": {"type": "string"}, "query": {"type": "string"}}},
+            executor="builtin:github.search", tags=["github", "network"],
+            error_codes=["github_not_configured", "github_http_error", "github_repository_not_allowed"]),
+        SkillSpec(id="scrape.url", name="Scrape URL",
+            description="Scrape a URL into markdown via Firecrawl, ScrapingBee, or Scrapfly.",
             side_effect="network",
             input_schema={"type": "object", "required": ["url"], "properties": {"url": {"type": "string"}}},
-            executor="builtin:scrape.url",
-            tags=["scrape"],
-            error_codes=["scrape_not_configured", "scrape_http_error", "invalid_args"],
-            timeout_ms=60_000,
-        ),
-        SkillSpec(
-            id="email.send",
-            name="Send email",
-            description="Send email via Resend.",
+            executor="builtin:scrape.url", tags=["scrape", "network"],
+            error_codes=["scrape_not_configured", "scrape_http_error"]),
+        SkillSpec(id="email.send", name="Send email",
+            description="Send transactional email via Resend. Required: to, subject, html.",
             side_effect="write",
-            input_schema={"type": "object", "required": ["to", "subject"], "properties": {"to": {}, "subject": {"type": "string"}, "html": {"type": "string"}, "from": {"type": "string"}}},
-            executor="builtin:email.send",
-            tags=["email", "write"],
-            error_codes=["skill_not_configured", "email_send_failed", "invalid_args"],
-        ),
-        SkillSpec(
-            id="rag.skills.search",
-            name="RAG skills search",
-            description="Keyword RAG over skills collection.",
+            input_schema={"type": "object", "required": ["to", "subject", "html"], "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "html": {"type": "string"}, "from": {"type": "string"}}},
+            executor="builtin:email.send", tags=["email", "write"],
+            error_codes=["email_send_failed", "skill_not_configured"]),
+        SkillSpec(id="rag.skills.search", name="RAG search (skills)",
+            description="Search the local RAG index for skill content (catalogs, docs, etc.).",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "collection": {"type": "string"}, "limit": {"type": "integer"}}},
+            executor="builtin:rag.skills.search", tags=["rag", "read"],
+            error_codes=["rag_empty"]),
+        SkillSpec(id="rag.code.search", name="RAG search (code)",
+            description="Search the local code RAG index.",
             side_effect="read",
             input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
-            executor="builtin:rag.skills.search",
-            tags=["rag", "skills"],
-            error_codes=["rag_empty", "invalid_args"],
-        ),
-        SkillSpec(
-            id="rag.code.search",
-            name="RAG code search",
-            description="Keyword RAG over code collection.",
-            side_effect="read",
-            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
-            executor="builtin:rag.code.search",
-            tags=["rag", "code"],
-            error_codes=["rag_empty", "invalid_args"],
-        ),
-        SkillSpec(
-            id="rag.upsert",
-            name="RAG upsert",
-            description="Upsert text into skills|code|docs collection.",
+            executor="builtin:rag.code.search", tags=["rag", "read"],
+            error_codes=["rag_empty"]),
+        SkillSpec(id="rag.upsert", name="RAG upsert",
+            description="Add a chunk to the local RAG index.",
             side_effect="write",
-            input_schema={"type": "object", "required": ["text"], "properties": {"collection": {"type": "string"}, "text": {"type": "string"}, "source": {"type": "string"}}},
-            executor="builtin:rag.upsert",
-            tags=["rag", "write"],
-            error_codes=["invalid_args"],
-        ),
-        SkillSpec(
-            id="rag.index_catalog",
-            name="Index skill catalog into RAG",
-            description="Subroutine: write skill catalog into skills RAG collection.",
+            input_schema={"type": "object", "required": ["collection", "text"], "properties": {"collection": {"type": "string"}, "text": {"type": "string"}, "source": {"type": "string"}, "meta": {"type": "object"}}},
+            executor="builtin:rag.upsert", tags=["rag", "write"],
+            error_codes=[]),
+        SkillSpec(id="rag.index_catalog", name="RAG index catalog",
+            description="Index all skills' descriptions into the skills RAG collection.",
             side_effect="write",
             input_schema={"type": "object", "properties": {}},
-            executor="builtin:rag.index_catalog",
-            tags=["rag", "meta"],
-            error_codes=[],
-        ),
-        SkillSpec(
-            id="skills.catalog",
-            name="List skills",
+            executor="builtin:rag.index_catalog", tags=["rag", "write"],
+            error_codes=[]),
+        SkillSpec(id="skills.catalog", name="List skills",
             description="Return enabled skill contracts.",
             side_effect="none",
             input_schema={"type": "object", "properties": {}},
-            executor="builtin:skills.catalog",
-            tags=["meta"],
-            error_codes=[],
-        ),
-        SkillSpec(
-            id="github.scenario.match",
-            name="GitHub scenario match",
-            description="Lookup the policy CSV for the trigger that just happened. Returns ranked matches from $AION_DATA_DIR/github_scenarios.csv with if_action / else_action / severity / source_doc. Never invents a row.",
+            executor="builtin:skills.catalog", tags=["meta"],
+            error_codes=[]),
+        # ---- 5 scenario matchers + 1 unified + 1 index = 7 new + 1 legacy = 8 ----
+        SkillSpec(id="github.scenario.match", name="GitHub scenario match",
+            description="Lookup the GitHub policy CSV. 500 rows grounded in 20+ GitHub docs pages (actions, secrets, API, webhooks, branch, Dependabot, Pages, etc.). Returns ranked matches with if_action / else_action / severity / source_doc. Never invents a row.",
             side_effect="read",
-            input_schema={
-                "type": "object",
-                "required": ["trigger"],
-                "properties": {
-                    "trigger": {"type": "string"},
-                    "condition": {"type": "string"},
-                    "category": {"type": "string"},
-                    "context": {"type": "object"},
-                    "csv_path": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-            },
-            executor="builtin:github.scenario.match",
-            tags=["github", "policy", "read"],
-            error_codes=[
-                "github_scenarios_load_failed",
-                "github_scenarios_empty",
-                "invalid_args",
-            ],
-        ),
-        SkillSpec(
-            id="github.scenario.index",
-            name="GitHub scenario index",
-            description="Subroutine: index the policy CSV into the local RAG 'github_policy' collection so rag.skills.search can find scenarios by natural language.",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:github.scenario.match", tags=["github", "policy", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="openclaw.scenario.match", name="OpenClaw scenario match",
+            description="Lookup the OpenClaw policy CSV. 500 rows covering shell, filesystem, Gmail, Notion, Slack, browser, skills. Never invents a row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:openclaw.scenario.match", tags=["openclaw", "policy", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="composio.scenario.match", name="Composio scenario match",
+            description="Lookup the Composio policy CSV. 500 rows covering sessions, auth, connected accounts, tool execute, MCP. Never invents a row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:composio.scenario.match", tags=["composio", "policy", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="firecrawl_steel.scenario.match", name="Firecrawl/Steel scenario match",
+            description="Lookup the Firecrawl+Steel policy CSV. 500 rows covering scrape, crawl, map, search, Steel sessions, pipeline handoff. Never invents a row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:firecrawl_steel.scenario.match", tags=["firecrawl", "steel", "policy", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="render.scenario.match", name="Render scenario match",
+            description="Lookup the Render policy CSV. 500 rows covering build, boot, health, runtime, scaling, env, API, DB, rollback. Never invents a row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:render.scenario.match", tags=["render", "policy", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="scenario.match", name="Scenario match (all packs)",
+            description="Unified scenario matcher: search all 5 packs (github, openclaw, composio, firecrawl_steel, render) at once. Returns ranked matches across packs so the model can pick the right one. Use a per-pack skill (e.g. github.scenario.match) when you know which domain the error is in.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {"trigger": {"type": "string"}, "condition": {"type": "string"}, "category": {"type": "string"}, "context": {"type": "object"}, "limit": {"type": "integer"}}},
+            executor="builtin:scenario.match", tags=["policy", "read", "all-packs"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="scenario.index", name="Scenario index (RAG)",
+            description="Index one or all scenario packs into the local RAG so rag.skills.search can find rows by natural language. Default collection: scenario_policy. Per-pack collection: scenario_policy_<pack>.",
             side_effect="write",
-            input_schema={
-                "type": "object",
-                "properties": {"csv_path": {"type": "string"}},
-            },
-            executor="builtin:github.scenario.index",
-            tags=["github", "policy", "rag"],
-            error_codes=["github_scenarios_load_failed", "github_scenarios_empty"],
-        ),
+            input_schema={"type": "object", "properties": {"pack": {"type": "string", "enum": ["github", "openclaw", "composio", "firecrawl_steel", "render", "all"]}}},
+            executor="builtin:scenario.index", tags=["policy", "rag", "write"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        SkillSpec(id="github.scenario.index", name="GitHub scenario index (legacy)",
+            description="Legacy: indexes the github pack into the 'github_policy' collection. Use scenario.index pack=github for the new behavior.",
+            side_effect="write",
+            input_schema={"type": "object", "properties": {}},
+            executor="builtin:github.scenario.index", tags=["github", "policy", "rag", "legacy"],
+            error_codes=["scenarios_load_failed", "scenarios_empty"]),
     ]
+
+
+async def _catalog(args, ctx):
+    """Return the enabled skill contracts from the registry."""
+    reg = get_registry()
+    skills = reg.list(enabled_only=True)
+    return {
+        "count": len(skills),
+        "skills": [
+            {
+                "id": s.id, "name": s.name, "description": s.description,
+                "version": s.version, "side_effect": s.side_effect,
+                "input_schema": s.input_schema, "executor": s.executor,
+                "tags": list(s.tags), "error_codes": list(s.error_codes),
+            }
+            for s in skills
+        ],
+    }
 
 
 def wire_executors() -> None:
     from .clients import github_scenarios as ghs
+    from .clients import scenarios as scn
     r = get_runner()
-    r.register_many(
-        {
-            "builtin:web.search": web.web_search,
-            "builtin:github.repo": gh.github_repo,
-            "builtin:github.file": gh.github_file,
-            "builtin:github.issues": gh.github_issues,
-            "builtin:github.search": gh.github_search,
-            "builtin:scrape.url": scrape.scrape_url,
-            "builtin:email.send": email_resend.email_send,
-            "builtin:rag.skills.search": rag.rag_skills_search,
-            "builtin:rag.code.search": rag.rag_code_search,
-            "builtin:rag.upsert": rag.rag_upsert,
-            "builtin:rag.index_catalog": rag.rag_index_skill_catalog,
-            "builtin:skills.catalog": _catalog,
-            "builtin:github.scenario.match": ghs.github_scenario_match,
-            "builtin:github.scenario.index": ghs.github_scenario_index,
-        }
-    )
-
-
-async def _catalog(args, ctx):
-    reg = get_registry()
-    return {"skills": reg.catalog(), "count": len(reg.list())}
+    r.register_many({
+        "builtin:web.search": web.web_search,
+        "builtin:github.repo": gh.github_repo,
+        "builtin:github.file": gh.github_file,
+        "builtin:github.issues": gh.github_issues,
+        "builtin:github.search": gh.github_search,
+        "builtin:scrape.url": scrape.scrape_url,
+        "builtin:email.send": email_resend.email_send,
+        "builtin:rag.skills.search": rag.rag_skills_search,
+        "builtin:rag.code.search": rag.rag_code_search,
+        "builtin:rag.upsert": rag.rag_upsert,
+        "builtin:rag.index_catalog": rag.rag_index_skill_catalog,
+        "builtin:skills.catalog": _catalog,
+        "builtin:github.scenario.match": ghs.github_scenario_match,
+        "builtin:github.scenario.index": ghs.github_scenario_index,
+        "builtin:openclaw.scenario.match": scn.openclaw_scenario_match,
+        "builtin:composio.scenario.match": scn.composio_scenario_match,
+        "builtin:firecrawl_steel.scenario.match": scn.firecrawl_steel_scenario_match,
+        "builtin:render.scenario.match": scn.render_scenario_match,
+        "builtin:scenario.match": scn.scenario_match_all,
+        "builtin:scenario.index": scn.scenario_index,
+    })
 
 
 def bootstrap() -> dict:
+    """Idempotent seed + executor wiring. Safe to call on every boot."""
     reg = get_registry()
-    n = reg.seed(all_specs())
     wire_executors()
-    return {"seeded": n, "skills": [s.id for s in reg.list()], "db": reg.db_path}
-
-
-if __name__ == "__main__":
-    import json
-    print(json.dumps(bootstrap(), indent=2))
-
+    n = reg.seed(all_specs())
+    return {"seeded": n, "db": reg.db_path}
