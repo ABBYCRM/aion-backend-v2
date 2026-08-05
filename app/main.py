@@ -134,6 +134,15 @@ async def lifespan(_: FastAPI):
         audit.record("brain.boot.failed", {"error": str(exc)[:200]})
         if settings.brain_required:
             raise
+    # Skill registry: seed built-ins + wire executors. Idempotent.
+    try:
+        from .skills_seed import seed_registry
+        from .skills_wiring import register_all_executors
+        n = seed_registry()
+        wired = register_all_executors()
+        audit.record("skills.boot", {"seeded": n, "executors_wired": wired})
+    except Exception as exc:
+        audit.record("skills.boot.failed", {"error": str(exc)[:200]})
     yield
     audit.record("aion.shutdown", {})
 
@@ -212,6 +221,18 @@ async def policy_github_check(repository: str, _: Principal = Depends(authentica
         return {"ok": True, "requested": repository, "normalized": None, "allowed": False, "reason": str(exc)}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ===========================================================================
+# Skill registry — micro-software contracts the model must use, not invent
+# ===========================================================================
+
+# Mount the skill routes. The router builds with our auth dependency so
+# the catalog is authed, the run endpoint is authed, and the seed/upsert
+# endpoints go through the same gate. Admin-only paths can override per
+# route inside skills_routes.py if needed later.
+from .skills_routes import build_router as _build_skills_router
+app.include_router(_build_skills_router(authenticated=authenticated))
 
 
 # ===========================================================================
