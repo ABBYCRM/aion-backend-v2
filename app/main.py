@@ -227,6 +227,111 @@ async def models(_: Principal = Depends(authenticated)): return {"chain": settin
 async def models_all(_: Principal = Depends(authenticated)):
     providers = await list_models(refresh=False); flat = [{"provider": provider, "model": model} for provider, info in providers.items() if info.get("ok") for model in info.get("models", [])]
     return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
+@app.get("/api/health/security")
+async def security_health(_: Principal = Depends(authenticated)):
+    """Defensive OPSEC: report the runtime security posture of this build.
+
+    Returns (never raises):
+      - pinned_versions: each Python dependency from requirements.txt + the
+        running version (when importable)
+      - audit_log: size in bytes + lines + last event timestamp
+      - vault: whether vault is configured, how many keys known, last
+        reconcile timestamp
+      - cors: the resolved CORS allowlist (no secrets, just the host list)
+      - auth: which env vars are set (no values)
+      - build: app version + environment
+
+    Used by the operator UI to surface "is this build still safe" — checks
+    that should fire alarms:
+      - any package is on a known-bad version (manual review)
+      - audit_log is empty (events stopped being recorded)
+      - vault disabled (AION_VAULT_MASTER_KEY missing)
+    """
+    import os as _os
+    import time as _time
+    from pathlib import Path as _Path
+
+    out: dict[str, Any] = {"ok": True, "ts": int(_time.time())}
+
+    # Pinned package versions from requirements.txt (the source of truth)
+    pinned: dict[str, str] = {}
+    try:
+        req_path = _Path(__file__).resolve().parents[1] / "requirements.txt"
+        for line in req_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # match "name==version" or "name>=version" etc.
+            for sep in ("==", ">=", "<=", "!=", "~=", ">"):
+                if sep in line:
+                    name, ver = line.split(sep, 1)
+                    pinned[name.strip().lower()] = f"{sep}{ver.strip()}"
+                    break
+    except Exception as exc:
+        out["pinned_error"] = str(exc)[:200]
+    out["pinned_versions"] = pinned
+
+    # Live package versions (best-effort; missing importlib is not fatal)
+    live: dict[str, str] = {}
+    for name in pinned.keys():
+        try:
+            mod = __import__(name.replace("-", "_").split("[")[0])
+            live[name] = getattr(mod, "__version__", "?")
+        except Exception:
+            pass
+    out["live_versions"] = live
+
+    # Audit log status
+    try:
+        audit_path = _Path(settings.audit_log_path)
+        if audit_path.is_file():
+            stat = audit_path.stat()
+            out["audit_log"] = {
+                "path": str(audit_path),
+                "size_bytes": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "lines": sum(1 for _ in audit_path.open(encoding="utf-8")),
+            }
+        else:
+            out["audit_log"] = {"path": str(audit_path), "exists": False}
+    except Exception as exc:
+        out["audit_log"] = {"error": str(exc)[:200]}
+
+    # Vault status (no values, just state)
+    try:
+        from .vault import VAULT_KNOWN_KEYS, vault
+        out["vault"] = {
+            "configured": vault is not None and bool(getattr(vault, "_master_key_enc", None)),
+            "known_keys": len(VAULT_KNOWN_KEYS),
+            "retention_lines": settings.audit_retention_lines,
+        }
+    except Exception as exc:
+        out["vault"] = {"error": str(exc)[:200]}
+
+    # CORS allowlist (no secrets)
+    out["cors"] = {
+        "origins": list(settings.cors_origins) if hasattr(settings, "cors_origins") else [],
+        "allow_credentials": bool(getattr(settings, "cors_allow_credentials", False)),
+    }
+
+    # Auth env presence (no values, just booleans)
+    out["auth_env"] = {
+        "AION_API_KEYS": bool(_os.environ.get("AION_API_KEYS")),
+        "AION_ADMIN_KEYS": bool(_os.environ.get("AION_ADMIN_KEYS")),
+        "AION_VAULT_MASTER_KEY": bool(_os.environ.get("AION_VAULT_MASTER_KEY")),
+        "AION_BRAIN_API_KEY": bool(_os.environ.get("AION_BRAIN_API_KEY")),
+    }
+
+    # Build / version
+    out["build"] = {
+        "version": settings.app_version,
+        "environment": settings.environment,
+        "python_version": _os.environ.get("PYTHON_VERSION", "?"),
+    }
+
+    return out
+
+
 @app.get("/api/audit/recent")
 async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
 
