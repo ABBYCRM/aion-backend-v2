@@ -387,7 +387,8 @@ async def ping(name: str, value: str) -> tuple[bool, int, str | None]:
     if name == "OPENROUTER_API_KEY":
         return await _ping_generic(name, value, url="https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {value}"})
     if name == "KIMI_API_KEY":
-        return await _ping_generic(name, value, url="https://api.moonshot.cn/v1/models", headers={"Authorization": f"Bearer {value}"})
+        # Global endpoint (api.moonshot.ai) — keys minted on platform.moonshot.ai work here.
+        return await _ping_generic(name, value, url="https://api.moonshot.ai/v1/models", headers={"Authorization": f"Bearer {value}"})
     if name == "BITDEER_API_KEY":
         return await _ping_generic(name, value, url="https://api-inference.bitdeer.ai/v1/models", headers={"Authorization": f"Bearer {value}"})
     if name == "ANTHROPIC_API_KEY":
@@ -401,9 +402,11 @@ async def ping(name: str, value: str) -> tuple[bool, int, str | None]:
     if name == "EXA_API_KEY":
         return await _ping_generic(name, value, url="https://api.exa.ai/search", method="POST", headers={"x-api-key": value, "Content-Type": "application/json"}, json_body={"query": "ping", "numResults": 1})
     if name == "FIRECRAWL_API_KEY":
-        return await _ping_generic(name, value, url="https://api.firecrawl.dev/v1/team/credit_usage", headers={"Authorization": f"Bearer {value}"})
+        # v2: /v1/team/credit_usage was removed. /v2/scrape returns 401 for bad key, 200 for good.
+        return await _ping_generic(name, value, method="POST", url="https://api.firecrawl.dev/v2/scrape", headers={"Authorization": f"Bearer {value}", "Content-Type": "application/json"}, json_body={"url": "https://example.com"})
     if name == "SCRAPINGBEE_API_KEY":
-        return await _ping_generic(name, value, url=f"https://app.scrapingbee.com/api/v1/ping?api_key={value}")
+        # /api/v1/ping is gone. /api/v1/usage returns {"message":"Invalid api key"} for bad key, JSON for good.
+        return await _ping_generic(name, value, url=f"https://app.scrapingbee.com/api/v1/usage?api_key={value}")
     if name == "SCRAPFLY_API_KEY":
         return await _ping_generic(name, value, url=f"https://api.scrapfly.io/scrape?key={value}&url=https://example.com")
     if name == "GITHUB_TOKEN":
@@ -416,8 +419,8 @@ async def ping(name: str, value: str) -> tuple[bool, int, str | None]:
         # ScreenshotOne requires an HMAC signature. Just check the format.
         return (True, 0, None) if 16 <= len(value) <= 128 else (False, 0, "key_format_unexpected")
     if name == "COMPOSIO_API_KEY":
-        # v3 apps endpoint, but auth may differ. Try /api/v1/auth/me first.
-        return await _ping_generic(name, value, url="https://backend.composio.dev/api/v1/auth/me", headers={"x-api-key": value})
+        # v3: docs.composio.dev/reference/v3 — base https://backend.composio.dev/api/v3
+        return await _ping_generic(name, value, url="https://backend.composio.dev/api/v3/auth/session/info", headers={"x-api-key": value})
     if name == "PINECONE_API_KEY":
         return await _ping_generic(name, value, url="https://api.pinecone.io/indexes", headers={"Api-Key": value, "X-Pinecone-API-Version": "2024-07"})
     if name == "E2B_API_KEY":

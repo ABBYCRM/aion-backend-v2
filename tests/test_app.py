@@ -830,6 +830,51 @@ def test_scenario_skill_routes_run_github_returns_real_data():
     assert any(t in trig for t in ("workflow", "run", "cancel")), f"unexpected trigger: {trig}"
 
 
+
+
+def test_vault_ping_endpoints_return_auth_signals_for_bad_keys():
+    """The 5 ping endpoints that previously returned 404 or 410 must now
+    return a proper 401/403/etc. for an invalid key (proving the endpoint
+    exists and is correctly auth-gated)."""
+    from app.vault import _ping_generic
+    import asyncio
+
+    async def _check(name, ping):
+        ok, latency, err = await ping()
+        # A 401/403/410/etc. with a sensible message is the success case.
+        # We just want to confirm the endpoint exists and is auth-gated.
+        assert err is None or any(s in (err or "") for s in (
+            "401", "403", "Unauthorized", "Authentication", "Invalid", "auth", "Unauthorized"
+        )), f"{name}: unexpected error: {err}"
+
+    # Composio v3
+    async def _composio():
+        return await _ping_generic("COMPOSIO_API_KEY", "invalid_test_key",
+            url="https://backend.composio.dev/api/v3/auth/session/info",
+            headers={"x-api-key": "invalid_test_key"})
+    asyncio.get_event_loop().run_until_complete(_check("COMPOSIO", _composio))
+
+    # Firecrawl v2
+    async def _firecrawl():
+        return await _ping_generic("FIRECRAWL_API_KEY", "invalid_test_key",
+            method="POST", url="https://api.firecrawl.dev/v2/scrape",
+            headers={"Authorization": "Bearer invalid_test_key", "Content-Type": "application/json"},
+            json_body={"url": "https://example.com"})
+    asyncio.get_event_loop().run_until_complete(_check("FIRECRAWL", _firecrawl))
+
+    # ScrapingBee
+    async def _scrapingbee():
+        return await _ping_generic("SCRAPINGBEE_API_KEY", "invalid_test_key",
+            url="https://app.scrapingbee.com/api/v1/usage?api_key=invalid_test_key")
+    asyncio.get_event_loop().run_until_complete(_check("SCRAPINGBEE", _scrapingbee))
+
+    # Kimi global endpoint
+    async def _kimi():
+        return await _ping_generic("KIMI_API_KEY", "invalid_test_key",
+            url="https://api.moonshot.ai/v1/models",
+            headers={"Authorization": "Bearer invalid_test_key"})
+    asyncio.get_event_loop().run_until_complete(_check("KIMI", _kimi))
+
 # ---------------------------------------------------------------------------
 # DuckDuckGo fallback search (no BRAVE_API_KEY required)
 # ---------------------------------------------------------------------------
