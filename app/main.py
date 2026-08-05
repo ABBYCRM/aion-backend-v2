@@ -224,28 +224,32 @@ async def policy_github_check(repository: str, _: Principal = Depends(authentica
 async def skills_debug_scenarios(_: Principal = Depends(authenticated)):
     """Operator-only debug: print resolved path + file existence for
     github_scenarios.csv. Never returns secret values."""
-    from .skills.clients.github_scenarios import resolve_csv_path
-    candidates = []
-    env_override = os.environ.get("AION_GITHUB_SCENARIOS_CSV")
-    if env_override:
-        candidates.append({"path": env_override, "exists": os.path.exists(env_override)})
-    data_dir = os.environ.get("AION_DATA_DIR")
-    if data_dir:
-        p = str(Path(data_dir) / "github_scenarios.csv")
-        candidates.append({"path": p, "exists": os.path.exists(p)})
-    for p in ["/app/data/github_scenarios.csv", "./data/github_scenarios.csv"]:
-        candidates.append({"path": p, "exists": os.path.exists(p)})
-    resolved = resolve_csv_path()
-    return {
-        "ok": True,
-        "resolved_path": str(resolved),
-        "resolved_exists": resolved.exists(),
-        "candidates": candidates,
-        "AION_DATA_DIR": os.environ.get("AION_DATA_DIR"),
-        "AION_GITHUB_SCENARIOS_CSV": os.environ.get("AION_GITHUB_SCENARIOS_CSV"),
-        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
-        "cwd": os.getcwd(),
-    }
+    try:
+        from .skills.clients.github_scenarios import resolve_csv_path
+        candidates = []
+        env_override = os.environ.get("AION_GITHUB_SCENARIOS_CSV")
+        if env_override:
+            candidates.append({"path": env_override, "exists": os.path.exists(env_override)})
+        data_dir = os.environ.get("AION_DATA_DIR")
+        if data_dir:
+            p = str(Path(data_dir) / "github_scenarios.csv")
+            candidates.append({"path": p, "exists": os.path.exists(p)})
+        for p in ["/app/data/github_scenarios.csv", "./data/github_scenarios.csv"]:
+            candidates.append({"path": p, "exists": os.path.exists(p)})
+        resolved = resolve_csv_path()
+        return {
+            "ok": True,
+            "resolved_path": str(resolved),
+            "resolved_exists": resolved.exists(),
+            "candidates": candidates,
+            "AION_DATA_DIR": os.environ.get("AION_DATA_DIR"),
+            "AION_GITHUB_SCENARIOS_CSV": os.environ.get("AION_GITHUB_SCENARIOS_CSV"),
+            "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+            "cwd": os.getcwd(),
+        }
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "tb": traceback.format_exc()[:500]}
 
 
 # ===========================================================================
