@@ -7,6 +7,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -232,15 +233,15 @@ async def skills_debug_scenarios(_: Principal = Depends(authenticated)):
             candidates.append({"path": env_override, "exists": os.path.exists(env_override)})
         data_dir = os.environ.get("AION_DATA_DIR")
         if data_dir:
-            p = str(Path(data_dir) / "github_scenarios.csv")
+            p = os.path.join(data_dir, "github_scenarios.csv")
             candidates.append({"path": p, "exists": os.path.exists(p)})
         for p in ["/app/data/github_scenarios.csv", "./data/github_scenarios.csv"]:
             candidates.append({"path": p, "exists": os.path.exists(p)})
         resolved = resolve_csv_path()
         return {
             "ok": True,
-            "resolved_path": str(resolved),
-            "resolved_exists": resolved.exists(),
+            "resolved_path": resolved,
+            "resolved_exists": os.path.exists(resolved),
             "candidates": candidates,
             "AION_DATA_DIR": os.environ.get("AION_DATA_DIR"),
             "AION_GITHUB_SCENARIOS_CSV": os.environ.get("AION_GITHUB_SCENARIOS_CSV"),
