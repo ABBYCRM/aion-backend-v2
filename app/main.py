@@ -136,11 +136,9 @@ async def lifespan(_: FastAPI):
             raise
     # Skill registry: seed built-ins + wire executors. Idempotent.
     try:
-        from .skills_seed import seed_registry
-        from .skills_wiring import register_all_executors
-        n = seed_registry()
-        wired = register_all_executors()
-        audit.record("skills.boot", {"seeded": n, "executors_wired": wired})
+        from .skills import bootstrap as _skills_bootstrap
+        info = _skills_bootstrap()
+        audit.record("skills.boot", {"seeded": info.get("seeded"), "db": info.get("db")})
     except Exception as exc:
         audit.record("skills.boot.failed", {"error": str(exc)[:200]})
     yield
@@ -227,11 +225,10 @@ async def policy_github_check(repository: str, _: Principal = Depends(authentica
 # Skill registry — micro-software contracts the model must use, not invent
 # ===========================================================================
 
-# Mount the skill routes. The router builds with our auth dependency so
-# the catalog is authed, the run endpoint is authed, and the seed/upsert
-# endpoints go through the same gate. Admin-only paths can override per
-# route inside skills_routes.py if needed later.
-from .skills_routes import build_router as _build_skills_router
+# Mount the full skill pack. build_router(authenticated) drops the
+# /api/skills catalog, /api/skills/run, and /api/skills/bootstrap
+# endpoints, all authed through the same X-AION-Key path as /api/chat.
+from .skills.routes import build_router as _build_skills_router
 app.include_router(_build_skills_router(authenticated=authenticated))
 
 
