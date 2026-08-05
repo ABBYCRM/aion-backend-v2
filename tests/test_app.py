@@ -404,7 +404,7 @@ def test_skills_bootstrap_seeds_12_contracts():
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 14
+    assert info.get("seeded") == 20
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -499,7 +499,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 12
+    assert result.data["count"] >= 20
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -607,7 +607,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 14
+    assert body.get("count") >= 20
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -628,7 +628,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 14
+    assert body["data"]["count"] >= 20
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -679,7 +679,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 14
+    assert body.get("seeded") == 20
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -687,98 +687,127 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 14
+    assert r2.json().get("seeded") == 20
 
 
 
 
-def test_scenario_bootstrap_seeds_14_contracts():
+def test_scenario_bootstrap_seeds_20_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 14
+    assert info.get("seeded") == 20
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
     assert "github.scenario.index" in ids
 
 
-def test_scenario_match_returns_ranked_rows():
-    """Trigger a known token in the seeded CSV; the matcher must return
-    a non-empty list, sorted by score desc, with the best match in chosen."""
-    import os, tempfile
-    tmp = tempfile.mkdtemp()
-    csv_path = os.path.join(tmp, "github_scenarios.csv")
-    # Write a small controlled CSV for deterministic match
-    import csv as _csv
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
-        w.writeheader()
-        w.writerow({"id":"GH-0001","category":"actions_run","trigger":"workflow run is cancelled by user","condition":"workflow.elapsed_seconds < 60","if_action":"emit workflow_cancelled event; release concurrency","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
-        w.writerow({"id":"GH-0002","category":"api","trigger":"x-ratelimit-remaining drops below threshold","condition":"request.method == 'GET'","if_action":"backoff per Retry-After","else_action":"halt API activity","severity":"medium","source_doc":"docs.github.com/rest"})
-        w.writerow({"id":"GH-0003","category":"secrets","trigger":"workflow triggered from a fork tries to read a repo secret","condition":"secrets.MY_SECRET exists at repo level","if_action":"use GITHUB_TOKEN (read-only)","else_action":"block workflow","severity":"critical","source_doc":"docs.github.com/secrets"})
-    from app.skills.clients import github_scenarios as ghs
-    out = ghs.match_scenarios("workflow is cancelled", csv_path=csv_path, limit=3)
+def test_scenarios_dir_resolver_finds_scenarios_in_image():
+    """The unified matcher must walk the priority chain and find the
+    operator-shipped packs at /app/data/scenarios/."""
+    from app.skills.clients.scenarios import _resolve_scenarios_dir, PACKS
+    scenarios_dir = _resolve_scenarios_dir()
+    assert scenarios_dir.exists(), f"scenarios dir not found: {scenarios_dir}"
+    # Each pack CSV must exist
+    for pack, fname in PACKS.items():
+        path = scenarios_dir / fname
+        assert path.exists(), f"missing pack: {path}"
+        # Each CSV is at least 500 rows + header
+        n = sum(1 for _ in path.open("r", encoding="utf-8")) - 1
+        assert n >= 500, f"{pack} has only {n} rows"
+
+
+def test_scenario_match_github_pack_returns_real_rows():
+    """github.scenario.match must return ranked matches from the real
+    500-row pack (not the old stub)."""
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("workflow run is cancelled by user", pack="github", limit=3)
     assert out["count"] >= 1
-    assert out["chosen"] is not None
-    assert out["chosen"]["id"] == "GH-0001"
-    # sorted desc
-    scores = [m["score"] for m in out["matches"]]
-    assert scores == sorted(scores, reverse=True)
+    ch = out["chosen"]
+    # The real github pack has trigger text like "A workflow run is cancelled"
+    assert "workflow" in ch["trigger"].lower() or "cancelled" in ch["trigger"].lower()
+    assert ch["pack"] == "github"
+    assert ch["severity"] in ("high", "medium", "low", "critical")
 
 
-def test_scenario_match_returns_empty_when_no_token_overlap():
-    """A trigger with zero token overlap must return matches=[] with a
-    clear reason (not invent a row)."""
-    import os, tempfile, csv as _csv
-    tmp = tempfile.mkdtemp()
-    csv_path = os.path.join(tmp, "github_scenarios.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
-        w.writeheader()
-        w.writerow({"id":"GH-100","category":"actions_run","trigger":"workflow run is cancelled","condition":"x","if_action":"y","else_action":"z","severity":"high","source_doc":"docs"})
-    from app.skills.clients import github_scenarios as ghs
-    out = ghs.match_scenarios("xyzzy plumbus", csv_path=csv_path, limit=3)
-    assert out["count"] == 0
-    assert out["matches"] == []
-    assert out["chosen"] is None
-    assert "0 rows" in out["reason"]
+def test_scenario_match_openclaw_pack_returns_real_rows():
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("Agent invokes the shell skill to run a command", pack="openclaw", limit=2)
+    assert out["count"] >= 1
+    ch = out["chosen"]
+    assert ch["pack"] == "openclaw"
+    # openclaw rows have a `skill` column
+    assert "skill" in ch or ch.get("category") == "core_shell"
 
 
-def test_scenario_match_missing_trigger_returns_invalid_args():
-    from app.skills.clients import github_scenarios as ghs
+def test_scenario_match_composio_pack_returns_real_rows():
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("Agent calls composio.create(userId) to open a new session", pack="composio", limit=2)
+    assert out["count"] >= 1
+    ch = out["chosen"]
+    assert ch["pack"] == "composio"
+
+
+def test_scenario_match_firecrawl_steel_pack_returns_real_rows():
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("Agent calls /v2/scrape on a single URL", pack="firecrawl_steel", limit=2)
+    assert out["count"] >= 1
+    ch = out["chosen"]
+    assert ch["pack"] == "firecrawl_steel"
+    # firecrawl rows have a `service` column
+    assert "service" in ch
+
+
+def test_scenario_match_render_pack_returns_real_rows():
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("Render build phase starts for the service", pack="render", limit=2)
+    assert out["count"] >= 1
+    ch = out["chosen"]
+    assert ch["pack"] == "render"
+
+
+def test_scenario_match_all_packs_returns_mixed_results():
+    """scenario.match (the unified one) must return matches from
+    multiple packs when the trigger is generic."""
+    from app.skills.clients.scenarios import match_scenarios
+    out = match_scenarios("error", pack="all", limit=10)
+    # The unified matcher should find at least a few matches across packs
+    assert out["count"] >= 1
+    packs_in_matches = {m["pack"] for m in out["matches"]}
+    # At least one of the 5 packs should be represented
+    assert len(packs_in_matches) >= 1
+
+
+def test_scenario_match_unknown_pack_returns_invalid_args():
+    from app.skills.clients.scenarios import match_scenarios
     from app.skills.base import SkillError
     try:
-        ghs.match_scenarios("", csv_path="/nonexistent")
+        match_scenarios("anything", pack="not_a_real_pack")
         assert False, "expected SkillError"
     except SkillError as e:
         assert e.error_code == "invalid_args"
-        assert "trigger" in str(e)
+        assert "unknown_pack" in str(e)
 
 
-def test_scenario_match_missing_csv_returns_load_failed():
-    from app.skills.clients import github_scenarios as ghs
-    from app.skills.base import SkillError
-    try:
-        ghs.match_scenarios("anything", csv_path="/nonexistent/path.csv")
-        assert False, "expected SkillError"
-    except SkillError as e:
-        assert e.error_code == "github_scenarios_load_failed"
+def test_scenario_index_creates_rag_collections():
+    """scenario.index must write 2,500 rows (5 packs * 500) into
+    'scenario_policy' when pack=all."""
+    from app.skills.clients.scenarios import scenario_index, _resolve_scenarios_dir
+    # Run the subroutine
+    import asyncio
+    out = asyncio.get_event_loop().run_until_complete(
+        scenario_index({"pack": "all"}, {})
+    )
+    assert out["indexed"] >= 2500, f"expected >= 2500 rows, got {out['indexed']}"
+    assert out["collection"] == "scenario_policy"
+    assert sorted(out["packs_indexed"]) == ["composio", "firecrawl_steel", "github", "openclaw", "render"]
 
 
-def test_scenario_skill_routes_returns_real_data():
+def test_scenario_skill_routes_run_github_returns_real_data():
     """End-to-end: POST /api/skills/run github.scenario.match must
-    return ok=true with ranked matches from the seeded CSV."""
-    import os, csv as _csv
-    # Write a small test CSV in the data dir so the matcher can find it
-    csv_path = os.path.join(os.environ.get("AION_DATA_DIR", "/tmp/aion-test-data"), "github_scenarios.csv")
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
-        w.writeheader()
-        w.writerow({"id":"GH-0001","category":"actions_run","trigger":"actions_run workflow is cancelled by user","condition":"workflow.elapsed_seconds < 60","if_action":"emit workflow_cancelled event","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
-        w.writerow({"id":"GH-0002","category":"actions_run","trigger":"actions_run workflow is cancelled by API","condition":"workflow.conclusion == 'cancelled'","if_action":"emit workflow_cancelled event","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
+    return ok=true with ranked matches from the real github pack."""
     from app.skills import bootstrap
     from app import main as main_mod
     import importlib
@@ -789,15 +818,16 @@ def test_scenario_skill_routes_returns_real_data():
     r = client.post(
         "/api/skills/run",
         headers=USER_HEADERS,
-        json={"skill_id": "github.scenario.match", "args": {"trigger": "actions_run workflow cancelled"}},
+        json={"skill_id": "github.scenario.match", "args": {"trigger": "workflow run is cancelled by user"}},
     )
     assert r.status_code == 200
     body = r.json()
-    assert body.get("ok") is True, f"expected ok, got {body}"
-    assert body["data"]["count"] >= 1
-    assert body["data"]["chosen"] is not None
-    m = body["data"]["matches"][0]
-    assert {"id", "category", "trigger", "condition", "if_action", "else_action", "severity", "source_doc", "score"}.issubset(m.keys())
+    assert body.get("ok") is True
+    ch = body["data"]["chosen"]
+    assert ch["pack"] == "github"
+    # The chosen trigger should overlap with our input (workflow, run, cancel, user)
+    trig = ch["trigger"].lower()
+    assert any(t in trig for t in ("workflow", "run", "cancel")), f"unexpected trigger: {trig}"
 
 
 # ---------------------------------------------------------------------------

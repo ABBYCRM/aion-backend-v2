@@ -38,6 +38,10 @@ def build_router(authenticated: Callable = _anon) -> APIRouter:
 
     @router.post("/bootstrap")
     async def do_bootstrap(principal=Depends(authenticated)):
-        return {"ok": True, **bootstrap()}
+        info = bootstrap()
+        # Return the seeded skill ids so callers can see what was registered
+        from .registry_core import get_registry
+        ids = [s.id for s in get_registry().list(enabled_only=False)]
+        return {"ok": True, **info, "skills": ids}
 
     return router
