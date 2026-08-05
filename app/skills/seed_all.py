@@ -11,7 +11,7 @@ scenario policy library:
   - scenario.match  (unified, all 5 packs at once)
   - scenario.index  (RAG indexer, 1 pack or all)
 
-Total: 20 contracts on boot.
+Total: 25 contracts on boot.
 """
 from __future__ import annotations
 
@@ -147,6 +147,37 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "properties": {}},
             executor="builtin:github.scenario.index", tags=["github", "policy", "rag", "legacy"],
             error_codes=["scenarios_load_failed", "scenarios_empty"]),
+        # ---- 6th pack: aion_stack (2,500 rows across 5 layers) ----
+        # aion_stack.scenario.match: same per-pack match contract as the
+        # 5 domain packs but against the cross-layer AION policy spine.
+        SkillSpec(id="aion_stack.scenario.match", name="AION stack scenario match",
+            description="Lookup the aion_stack policy CSV (2,500 rows across 5 layers: scenarios / books_rag / code_corpus / tools / kernel). Use the optional `layer` filter to narrow to one layer. Same v2 weighted scoring; never invents a row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {
+                "trigger": {"type": "string"},
+                "layer": {"type": "string", "enum": ["scenarios", "books_rag", "code_corpus", "tools", "kernel"]},
+                "condition": {"type": "string"},
+                "category": {"type": "string"},
+                "context": {"type": "object"},
+                "limit": {"type": "integer"},
+                "min_score": {"type": "number"},
+            }},
+            executor="builtin:aion_stack.scenario.match", tags=["policy", "stack", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
+        # stack.policy.match: filtered unified view of aion_stack only,
+        # by layer. Used when the operator wants the cross-layer
+        # policy spine without the 5 domain packs.
+        SkillSpec(id="stack.policy.match", name="AION stack policy match",
+            description="Search the aion_stack pack only (skips the 5 domain packs). Optional `layer` filter narrows to one of scenarios / books_rag / code_corpus / tools / kernel. Returns ranked rows with how/when/why metadata. Never invents.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["trigger"], "properties": {
+                "trigger": {"type": "string"},
+                "layer": {"type": "string", "enum": ["scenarios", "books_rag", "code_corpus", "tools", "kernel"]},
+                "limit": {"type": "integer"},
+                "min_score": {"type": "number"},
+            }},
+            executor="builtin:stack.policy.match", tags=["policy", "stack", "read"],
+            error_codes=["scenarios_load_failed", "scenarios_empty", "invalid_args"]),
         # ---- 3 coding-books skills (operator RAG pack, 2026-08-05) ----
         SkillSpec(id="coding.books.index", name="Coding books RAG indexer",
             description="Parse data/books/coding_books_catalog.json (39 open coding books) and upsert one RAG document per book into the coding_books collection. No PDF download required; indexes metadata + notes. Idempotent (deterministic chunk_id per book).",
@@ -213,6 +244,8 @@ def wire_executors() -> None:
         "builtin:render.scenario.match": scn.render_scenario_match,
         "builtin:scenario.match": scn.scenario_match_all,
         "builtin:scenario.index": scn.scenario_index,
+        "builtin:aion_stack.scenario.match": scn.aion_stack_scenario_match,
+        "builtin:stack.policy.match": scn.aion_stack_scenario_match,  # alias: same exec, layer filter via args
         "builtin:coding.books.index": cbr.coding_books_index,
         "builtin:coding.books.search": cbr.coding_books_search,
         "builtin:coding.books.catalog": cbr.coding_books_catalog,

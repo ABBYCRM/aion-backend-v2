@@ -17,13 +17,22 @@ from typing import Any, Dict, Iterable, List, Optional
 logger = logging.getLogger("aion.skills.scenario_store")
 
 # Pack name → filename
+# 5 domain packs (500 rows each = 2,500) + 1 stack pack (2,500 rows
+# across 5 layers) = 5,000 policy rows total.
 PACK_FILES: Dict[str, str] = {
     "github": "github_scenarios.csv",
     "openclaw": "openclaw_scenarios.csv",
     "composio": "composio_scenarios.csv",
     "firecrawl_steel": "firecrawl_steel_scenarios.csv",
     "render": "render_scenarios.csv",
+    "aion_stack": "aion_stack_scenarios.csv",
 }
+
+# The aion_stack pack has 5 logical layers (scenarios / books_rag /
+# code_corpus / tools / kernel). Domain packs have layer = "".
+STACK_LAYERS: tuple[str, ...] = (
+    "scenarios", "books_rag", "code_corpus", "tools", "kernel",
+)
 
 # Columns present across packs (optional ones may be empty)
 KNOWN_COLUMNS = (
@@ -53,6 +62,8 @@ class ScenarioRow:
     source_doc: str
     skill: str = ""
     service: str = ""
+    # Only set on aion_stack rows; "" for the 5 domain packs.
+    layer: str = ""
     # Pre-tokenized for fast overlap (lowercase tokens)
     trigger_tokens: frozenset = field(default_factory=frozenset, compare=False)
     condition_tokens: frozenset = field(default_factory=frozenset, compare=False)
@@ -64,6 +75,7 @@ class ScenarioRow:
             "category": self.category,
             "skill": self.skill or None,
             "service": self.service or None,
+            "layer": self.layer or None,
             "trigger": self.trigger,
             "condition": self.condition,
             "if_action": self.if_action,
@@ -290,6 +302,7 @@ class ScenarioStore:
                     category=(raw.get("category") or "").strip(),
                     skill=(raw.get("skill") or "").strip(),
                     service=(raw.get("service") or "").strip(),
+                    layer=(raw.get("layer") or "").strip().lower(),
                     trigger=trigger,
                     condition=condition,
                     if_action=(raw.get("if_action") or "").strip(),
@@ -308,6 +321,7 @@ class ScenarioStore:
         category: Optional[str] = None,
         skill: Optional[str] = None,
         service: Optional[str] = None,
+        layer: Optional[str] = None,
         severity_min: Optional[str] = None,
     ) -> Iterable[ScenarioRow]:
         self.ensure_loaded()
@@ -325,6 +339,8 @@ class ScenarioStore:
             if skill and r.skill and r.skill != skill:
                 continue
             if service and r.service and r.service != service:
+                continue
+            if layer and r.layer and r.layer != layer.lower():
                 continue
             if min_sev is not None:
                 if sev_order.get(r.severity, 1) < min_sev:

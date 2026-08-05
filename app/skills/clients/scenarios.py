@@ -47,7 +47,7 @@ def _to_v1_shape(v2: dict[str, Any], *, query: dict[str, Any] | None = None) -> 
             "source_doc": m.get("source_doc") or "",
             "score": m.get("score", 0.0),
         }
-        for extra in ("skill", "service"):
+        for extra in ("skill", "service", "layer"):
             v = m.get(extra)
             if v:
                 out[extra] = v
@@ -80,6 +80,12 @@ def _to_v1_shape(v2: dict[str, Any], *, query: dict[str, Any] | None = None) -> 
 
 _VALID_PACKS = frozenset({
     "all", "github", "openclaw", "composio", "firecrawl_steel", "render",
+    "aion_stack",
+})
+
+
+_VALID_LAYERS = frozenset({
+    "scenarios", "books_rag", "code_corpus", "tools", "kernel",
 })
 
 
@@ -89,23 +95,32 @@ def match_scenarios(
     pack: str = "all",
     condition: str | None = None,
     category: str | None = None,
+    layer: str | None = None,
     context: dict[str, Any] | None = None,
     limit: int = 5,
     min_score: float = 1.25,
 ) -> dict[str, Any]:
     """Operator v2 matcher behind the v1 public surface. Returns the
     v1 result shape so the 20 existing skill contracts and the
-    DEFER gate in main.py keep working unchanged."""
+    DEFER gate in main.py keep working unchanged. The `layer` param
+    filters rows to a single logical layer of the aion_stack pack
+    (scenarios / books_rag / code_corpus / tools / kernel)."""
     from ..base import SkillError
     if pack and pack not in _VALID_PACKS:
         raise SkillError(
             "invalid_args",
             f"unknown_pack:{pack}",
         )
+    if layer and layer not in _VALID_LAYERS:
+        raise SkillError(
+            "invalid_args",
+            f"unknown_layer:{layer}",
+        )
     v2 = _v2_match_scenarios(
         trigger=trigger,
         pack=pack,
         category=category,
+        layer=layer,
         context=context,
         limit=limit,
         min_score=min_score,
@@ -116,6 +131,7 @@ def match_scenarios(
             "trigger": trigger,
             "condition": condition,
             "category": category,
+            "layer": layer,
         },
     )
 
@@ -132,6 +148,7 @@ def _make_skill(pack: str):
             pack=args.get("pack") or pack,
             condition=args.get("condition"),
             category=args.get("category"),
+            layer=args.get("layer"),
             context=args.get("context"),
             limit=int(args.get("limit") or 5),
             min_score=float(args.get("min_score") or 1.25),
@@ -145,15 +162,19 @@ openclaw_scenario_match        = _make_skill("openclaw")
 composio_scenario_match        = _make_skill("composio")
 firecrawl_steel_scenario_match = _make_skill("firecrawl_steel")
 render_scenario_match          = _make_skill("render")
+aion_stack_scenario_match      = _make_skill("aion_stack")
 
 
 async def scenario_match_all(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
-    """Unified skill: search all 5 packs at once."""
+    """Unified skill: search all packs (incl. aion_stack) at once.
+    Optional `layer` filter narrows the aion_stack rows to one of
+    scenarios / books_rag / code_corpus / tools / kernel."""
     return match_scenarios(
         trigger=args.get("trigger", ""),
         pack="all",
         condition=args.get("condition"),
         category=args.get("category"),
+        layer=args.get("layer"),
         context=args.get("context"),
         limit=int(args.get("limit") or 10),
         min_score=float(args.get("min_score") or 1.25),

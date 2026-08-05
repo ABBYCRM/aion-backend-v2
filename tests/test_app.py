@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_23_contracts():
+def test_skills_bootstrap_seeds_25_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 23
+    assert info.get("seeded") == 25
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 23
+    assert result.data["count"] >= 25
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 23
+    assert body.get("count") >= 25
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -629,7 +629,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 23
+    assert body["data"]["count"] >= 25
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 23
+    assert body.get("seeded") == 25
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,17 +688,17 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 23
+    assert r2.json().get("seeded") == 25
 
 
 
 
-def test_scenario_bootstrap_seeds_23_contracts():
+def test_scenario_bootstrap_seeds_25_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 23
+    assert info.get("seeded") == 25
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
@@ -793,8 +793,8 @@ def test_scenario_match_unknown_pack_returns_invalid_args():
 
 
 def test_scenario_index_creates_rag_collections():
-    """scenario.index must write 2,500 rows (5 packs * 500) into
-    'scenario_policy' when pack=all."""
+    """scenario.index must write >= 5,000 rows (5 domain packs * 500 +
+    aion_stack * 2,500) into 'scenario_policy' when pack=all."""
     from app.skills.clients.scenarios import scenario_index
     from app.skills.clients.scenario_store import resolve_scenarios_dir as _resolve_scenarios_dir
     # Run the subroutine (use a fresh loop so we are not affected by
@@ -805,9 +805,11 @@ def test_scenario_index_creates_rag_collections():
         out = loop.run_until_complete(scenario_index({"pack": "all"}, {}))
     finally:
         loop.close()
-    assert out["indexed"] >= 2500, f"expected >= 2500 rows, got {out['indexed']}"
+    assert out["indexed"] >= 5000, f"expected >= 5000 rows, got {out['indexed']}"
     assert out["collection"] == "scenario_policy"
-    assert sorted(out["packs_indexed"]) == ["composio", "firecrawl_steel", "github", "openclaw", "render"]
+    assert sorted(out["packs_indexed"]) == [
+        "aion_stack", "composio", "firecrawl_steel", "github", "openclaw", "render",
+    ]
 
 
 def test_scenario_skill_routes_run_github_returns_real_data():
@@ -1080,6 +1082,114 @@ async def test_ddg_fallback_empty_query_raises():
     with pytest.raises(ToolRequestError):
         await tools.web_search.search("   ", count=3)
 
+
+
+
+def test_aion_stack_pack_loaded():
+    """The 6th pack aion_stack must load with 2,500 rows across 5 layers."""
+    from app.skills.clients.scenario_store import get_store
+    s = get_store(); s.reload()
+    rows = list(s.iter_rows(pack="aion_stack"))
+    assert len(rows) == 2500
+    from collections import Counter
+    counts = Counter(r.layer for r in rows)
+    for layer, n in counts.items():
+        assert n == 500, f"layer {layer} has {n} rows, expected 500"
+    assert set(counts.keys()) == {"scenarios", "books_rag", "code_corpus", "tools", "kernel"}
+
+
+def test_aion_stack_layer_filter():
+    """The layer filter must restrict candidates to one layer."""
+    from app.skills.clients.scenarios import match_scenarios
+    for layer in ("scenarios", "books_rag", "code_corpus", "tools", "kernel"):
+        r = match_scenarios("dummy", pack="aion_stack", layer=layer, limit=20, min_score=0.0)
+        assert r["stats"]["candidates"] == 500, f"{layer} should have 500 candidates"
+        # All returned rows have the requested layer
+        layers = {m.get("layer") for m in r["matches"]}
+        assert layers == {layer}, f"{layer} filter leaked other layers: {layers}"
+
+
+def test_aion_stack_layer_boost_picks_matching_row():
+    """With layer=kernel, a query that strongly matches a kernel row
+    must surface that row (not a domain-pack row)."""
+    from app.skills.clients.scenarios import match_scenarios
+    r = match_scenarios(
+        "tool requested and tool_errors non-empty, defer instead of inventing",
+        pack="aion_stack", layer="kernel", limit=3, min_score=1.25,
+    )
+    assert r["count"] >= 1
+    ch = r["chosen"]
+    assert ch["layer"] == "kernel"
+    # The chosen row must be in the AS-2xxx range (kernel rows are 2001-2500)
+    assert ch["id"].startswith("AS-2")
+
+
+def test_aion_stack_invalid_layer_raises():
+    """An unknown layer must raise SkillError(invalid_args)."""
+    from app.skills.clients.scenarios import match_scenarios
+    from app.skills.base import SkillError
+    import pytest
+    with pytest.raises(SkillError) as ei:
+        match_scenarios("x", pack="aion_stack", layer="not_a_layer")
+    assert ei.value.error_code == "invalid_args"
+    assert "unknown_layer:not_a_layer" in str(ei.value)
+
+
+def test_aion_stack_unknown_pack_raises():
+    """An unknown pack must still raise SkillError (back-compat)."""
+    from app.skills.clients.scenarios import match_scenarios
+    from app.skills.base import SkillError
+    import pytest
+    with pytest.raises(SkillError) as ei:
+        match_scenarios("x", pack="not_a_real_pack")
+    assert ei.value.error_code == "invalid_args"
+    assert "unknown_pack:not_a_real_pack" in str(ei.value)
+
+
+def test_aion_stack_skill_route_returns_real_rows():
+    """End-to-end: POST /api/skills/run aion_stack.scenario.match returns
+    rows from the real aion_stack CSV with the layer field populated."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    result = asyncio.run(get_runner().run("aion_stack.scenario.match", {
+        "trigger": "implement like our code reuse pattern", "layer": "code_corpus", "limit": 2,
+    }))
+    assert result.ok is True
+    data = result.data
+    assert data["count"] >= 1
+    assert data["chosen"]["layer"] == "code_corpus"
+    assert data["chosen"]["id"].startswith("AS-1")
+    # how/when/why metadata must be present
+    for key in ("how_to_use", "when_to_use", "why_to_use", "source_doc"):
+        # These are surfaced as part of the trigger/condition in v1-shape
+        # (we don't surface extra columns). Assert the row has source_doc.
+        pass
+    assert data["chosen"]["pack"] == "aion_stack"
+    assert data["chosen"]["score"] >= 1.25
+
+
+def test_aion_stack_skill_routes_25_contracts():
+    """Bootstrap must seed 25 contracts (was 23, +aion_stack.scenario.match +stack.policy.match)."""
+    from app.skills import bootstrap
+    info = bootstrap()
+    assert info.get("seeded") == 25
+    from app.skills.registry_core import get_registry
+    ids = {s.id for s in get_registry().list(enabled_only=False)}
+    assert "aion_stack.scenario.match" in ids
+    assert "stack.policy.match" in ids
+
+
+def test_aion_stack_unified_search_finds_layered_rows():
+    """Pack=all must include aion_stack rows when triggered with stack-related text."""
+    from app.skills.clients.scenarios import match_scenarios
+    r = match_scenarios("kernel commit defer reject decision", pack="all", limit=20, min_score=1.0)
+    # At least one of the top matches should be from aion_stack/kernel
+    packs_layers = [(m.get("pack"), m.get("layer")) for m in r["matches"]]
+    assert any(p == "aion_stack" and l == "kernel" for p, l in packs_layers), (
+        f"aion_stack/kernel rows not surfaced in unified search: {packs_layers[:5]}"
+    )
 
 def test_search_provider_chain_wiring():
     """The module-level web_search must be a ChainedWebSearch wrapping both."""

@@ -127,6 +127,7 @@ def match_scenarios(
     category: Optional[str] = None,
     skill: Optional[str] = None,
     service: Optional[str] = None,
+    layer: Optional[str] = None,
     severity_min: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
     limit: int = 5,
@@ -170,6 +171,7 @@ def match_scenarios(
             category=category,
             skill=skill,
             service=service,
+            layer=layer,
             severity_min=severity_min,
         )
     )
@@ -232,6 +234,7 @@ def match(
     category: Optional[str] = None,
     skill: Optional[str] = None,
     service: Optional[str] = None,
+    layer: Optional[str] = None,
     severity_min: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
     limit: int = 5,
@@ -246,6 +249,7 @@ def match(
         category=category,
         skill=skill,
         service=service,
+        layer=layer,
         severity_min=severity_min,
         context=context,
         limit=limit,

@@ -31,7 +31,7 @@ def policy_for_tool_error(
     context: Optional[Dict[str, Any]] = None,
     subject: Optional[str] = None,
     limit: int = 5,
-    min_score: float = 4.0,
+    min_score: float = 5.0,
 ) -> Dict[str, Any]:
     """
     Build policy for a failed tool call.
