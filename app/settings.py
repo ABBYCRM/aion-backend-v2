@@ -82,6 +82,15 @@ class Settings:
     github_api_url: str
     github_allowed_repositories: tuple[str, ...]
     github_write_enabled: bool
+    # Aion-Brain integration. When brain_enabled is true and brain_url is set,
+    # AION Python delegates decision + chat to the Brain kernel.
+    brain_enabled: bool
+    brain_url: str
+    brain_service_key: str
+    brain_timeout_ms: int
+    brain_decision_only: bool
+    brain_required: bool
+    brain_state_check_on_startup: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -90,7 +99,7 @@ class Settings:
         private_key = os.getenv("GITHUB_PRIVATE_KEY", "").replace("\\n", "\n").strip()
         return cls(
             app_name=os.getenv("APP_NAME", "AION").strip() or "AION",
-            app_version=os.getenv("APP_VERSION", "2.0.0").strip() or "2.0.0",
+            app_version=os.getenv("APP_VERSION", "2.5.0").strip() or "2.0.0",
             environment=environment,
             log_level=os.getenv("LOG_LEVEL", "info").strip().lower(),
             api_keys=_csv(os.getenv("AION_API_KEYS", "")),
@@ -136,6 +145,13 @@ class Settings:
             github_api_url=os.getenv("GITHUB_API_URL", "https://api.github.com").rstrip("/"),
             github_allowed_repositories=tuple(item.lower() for item in _csv(os.getenv("GITHUB_ALLOWED_REPOSITORIES", ""))),
             github_write_enabled=_bool("GITHUB_WRITE_ENABLED", False),
+            brain_enabled=_bool("AION_BRAIN_ENABLED", False),
+            brain_url=os.getenv("AION_BRAIN_URL", "").strip().rstrip("/"),
+            brain_service_key=os.getenv("AION_BRAIN_KEY", "").strip(),
+            brain_timeout_ms=_int("AION_BRAIN_TIMEOUT_MS", 60_000, minimum=1_000, maximum=600_000),
+            brain_decision_only=_bool("AION_BRAIN_DECISION_ONLY", False),
+            brain_required=_bool("AION_BRAIN_REQUIRED", False),
+            brain_state_check_on_startup=_bool("AION_BRAIN_STATE_CHECK", True),
         )
 
     @property

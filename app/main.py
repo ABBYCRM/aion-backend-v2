@@ -23,6 +23,7 @@ from .rate_limit import _ChatCapacityExhausted, enforce_rate_limit, limiter
 from .settings import settings
 from .tools import ToolConfigurationError, ToolRequestError, github, web_search
 from .vault import KNOWN_KEYS as VAULT_KNOWN_KEYS, VaultError, VaultNotConfigured, _fingerprint, ping_all, vault
+from . import brain_client
 from .gallery import gallery
 
 _GITHUB_URL = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.I)
@@ -121,6 +122,15 @@ async def lifespan(_: FastAPI):
         if seeded: audit.record("vault.reconciled", {"seeded": seeded, "total": len(VAULT_KNOWN_KEYS)})
     except VaultNotConfigured as exc:
         audit.record("vault.disabled", {"reason": str(exc)})
+    # Verify Brain connectivity on startup (logs only, never crashes unless AION_BRAIN_REQUIRED=true)
+    try:
+        brain_client.require_or_warn()
+        if brain_client.is_configured():
+            await brain_client.verify_on_startup()
+    except Exception as exc:
+        audit.record("brain.boot.failed", {"error": str(exc)[:200]})
+        if settings.brain_required:
+            raise
     yield
     audit.record("aion.shutdown", {})
 
@@ -185,8 +195,23 @@ async def legacy_scratchpad(principal: Principal = Depends(authenticated)):
 
 @app.post("/api/decision")
 async def decision(body: DecisionRequest, principal: Principal = Depends(authenticated)):
-    context = MissionContext(user_input=body.user_input, history=[{"role": message.role, "content": message.text_content()} for message in body.history]); result = resolve_decision(context)
-    audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value}); return {"request_id": context.request_id, "decision": result.to_dict()}
+    history = [{"role": message.role, "content": message.text_content()} for message in body.history]
+    # If Brain is wired in, delegate the kernel decision to it. The
+    # Python kernel stays as a fallback when Brain is disabled.
+    if brain_client.is_configured():
+        try:
+            result = await brain_client.decision(user_input=body.user_input, history=history, metadata={"source": "aion.python.backend", "app_version": settings.app_version, "subject": principal.subject})
+            audit.record("kernel.decision.brain", {"subject": principal.subject, "state": result.get("decision", {}).get("state")})
+            return result
+        except (brain_client.BrainUnavailable, brain_client.BrainAuthRejected, brain_client.BrainBadResponse) as exc:
+            audit.record("kernel.decision.brain.failed", {"subject": principal.subject, "error": str(exc)[:200]})
+            if settings.brain_required:
+                return JSONResponse(status_code=200, content={"ok": False, "error": f"brain_unavailable: {exc}", "kind": "brain_unavailable"})
+            # Fall through to local kernel
+    context = MissionContext(user_input=body.user_input, history=history)
+    result = resolve_decision(context)
+    audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value})
+    return {"request_id": context.request_id, "decision": result.to_dict()}
 @app.post("/api/search")
 async def search(body: SearchBody, _: Principal = Depends(authenticated)):
     results = await web_search.search(body.query, count=body.count, freshness=body.freshness); return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
@@ -504,10 +529,41 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     try: model_chain = await resolve_model_chain(body.provider, body.model)
     except InvalidModelSelection as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AllProvidersFailed as exc: return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "all_providers_failed"})
-    audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository)})
+    audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository), "brain": brain_client.is_configured()})
+    use_brain = brain_client.is_configured() and not settings.brain_decision_only  # brain_decision_only means: use brain for /api/decision only, not /api/chat
     async def events() -> AsyncIterator[bytes]:
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
         for event in tool_events: yield _sse(event)
+        if use_brain:
+            # Stream from Brain. AION keeps the local system prompt, tool
+            # results, and notes context. Brain does the 7-law re-decision
+            # (if it wants) and the LLM provider chain.
+            try:
+                async with limiter.chat_slot():
+                    async for evt in brain_client.stream_chat(messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
+                        if evt.get("type") == "[DONE]":
+                            yield b"data: [DONE]\n\n"; return
+                        # Forward all Brain SSE events unchanged. The
+                        # frontend already understands the AION v2 contract.
+                        yield _sse(evt); await asyncio.sleep(0)
+                    yield b"data: [DONE]\n\n"
+                return
+            except brain_client.BrainUnavailable as exc:
+                if settings.brain_required:
+                    yield _sse({"type": "error", "kind": "brain_unavailable", "message": str(exc)[:200]})
+                    audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)[:200]})
+                    yield b"data: [DONE]\n\n"; return
+                # Fall through to local LLM chain
+                audit.record("chat.brain_fallback", {"subject": principal.subject, "request_id": mission.request_id, "reason": str(exc)[:200]})
+            except brain_client.BrainAuthRejected as exc:
+                yield _sse({"type": "error", "kind": "brain_auth_rejected", "message": str(exc)[:200]})
+                audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": "brain_auth_rejected"})
+                yield b"data: [DONE]\n\n"; return
+            except brain_client.BrainBadResponse as exc:
+                yield _sse({"type": "error", "kind": "brain_bad_response", "message": str(exc)[:200]})
+                audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": "brain_bad_response"})
+                yield b"data: [DONE]\n\n"; return
+        # Local LLM chain path (also used as fallback when Brain is down)
         async with limiter.chat_slot():
             try:
                 async for event_type, payload in stream_chat(model_chain=model_chain, messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, request_id=mission.request_id):

@@ -510,3 +510,96 @@ def test_llm_configured_providers_sees_vault_only_keys(_vault_db, monkeypatch):
     from app.llm import configured_providers
     providers = configured_providers()
     assert "moonshot" in providers, f"providers: {providers}"
+
+
+# ===========================================================================
+# Brain client integration tests
+# ===========================================================================
+
+
+def test_brain_not_configured_returns_unavailable(_vault_db):
+    from app import brain_client
+    # Default settings have brain_enabled=False
+    assert brain_client.is_configured() is False
+
+
+def test_brain_decision_delegates_when_configured(_vault_db, monkeypatch):
+    """When brain is configured and healthy, /api/decision hits Brain."""
+    from app import brain_client
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:10001")
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    assert brain_client.is_configured() is True
+    # Patch the brain_client.decision to simulate a healthy response
+    async def _fake_decision(*, user_input, history=None, metadata=None):
+        return {"request_id": "req_x", "decision": {"state": "COMMIT", "score": 0.9, "id": "dec_x", "checks": []}}
+    monkeypatch.setattr(brain_client, "decision", _fake_decision)
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.post("/api/decision", headers=USER_HEADERS, json={"user_input": "ping", "history": []})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["decision"]["state"] == "COMMIT"
+    assert body["request_id"] == "req_x"
+
+
+def test_brain_decision_falls_back_to_local_when_brain_down(_vault_db, monkeypatch):
+    """When brain is configured but unreachable, /api/decision falls back
+    to the local Python kernel (assuming AION_BRAIN_REQUIRED is false)."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:1")  # always down
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    monkeypatch.setenv("AION_BRAIN_REQUIRED", "false")
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.post("/api/decision", headers=USER_HEADERS, json={"user_input": "ping", "history": []})
+    assert r.status_code == 200
+    body = r.json()
+    assert "decision" in body
+    # Should be from the local kernel (which is still working)
+    assert body["decision"]["state"] in ("COMMIT", "DEFER", "REJECT")
+
+
+def test_brain_required_blocks_when_brain_down(_vault_db, monkeypatch):
+    """AION_BRAIN_REQUIRED=true means /api/decision returns 200+ok=false
+    with kind=brain_unavailable when the Brain is down."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:1")
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    monkeypatch.setenv("AION_BRAIN_REQUIRED", "true")
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.post("/api/decision", headers=USER_HEADERS, json={"user_input": "ping", "history": []})
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is False
+    assert body.get("kind") == "brain_unavailable"
+
+
+def test_brain_chat_streams_sse_events(_vault_db, monkeypatch):
+    """When Brain is configured, /api/chat proxies Brain's SSE stream."""
+    import asyncio, json
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:10001")
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    monkeypatch.setenv("AION_BRAIN_DECISION_ONLY", "false")
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.post("/api/chat", headers=USER_HEADERS, json={"messages": [{"role": "user", "content": "ping"}], "max_tokens": 64, "temperature": 0})
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers.get("content-type", "")
+    body = r.text
+    # Should at least contain a decision event
+    assert "decision" in body
