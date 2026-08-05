@@ -11,7 +11,7 @@ scenario policy library:
   - scenario.match  (unified, all 5 packs at once)
   - scenario.index  (RAG indexer, 1 pack or all)
 
-Total: 29 contracts on boot.
+Total: 34 contracts on boot.
 """
 from __future__ import annotations
 
@@ -224,6 +224,39 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "properties": {"domain": {"type": "string"}, "task_type": {"type": "string"}, "context_name": {"type": "string"}, "limit": {"type": "integer"}}, "additionalProperties": True},
             executor="builtin:coding.tasks.catalog", tags=["tasks", "code_corpus", "catalog"],
             error_codes=[]),
+        # ---- 5 extra-scenarios skills (operator pack, 2026-08-05) ----
+        # 29 languages x 100,000 scenarios = 2,900,000 cross-language
+        # engineering scenarios. Lazy-loaded per language (~14 MB each).
+        SkillSpec(id="extra.scenarios.list", name="Extra scenarios language catalog",
+            description="Return the 29-language catalog (slug / technology / count / size_bytes). Cheap — does not load any scenario file. Total: 2,900,000 scenarios across Assembly / Bash / C# / Clojure / COBOL / Dart / Elixir / Erlang / F# / Fortran / Go / Haskell / Julia / Kotlin / Lua / MATLAB / Objective-C / OCaml / Perl / PHP / PowerShell / R / Ruby / Rust / Scala / Solidity / SQL / Swift / Zig.",
+            side_effect="read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": True},
+            executor="builtin:extra.scenarios.list", tags=["scenarios", "extra", "catalog"],
+            error_codes=["data_dir_missing"]),
+        SkillSpec(id="extra.scenarios.get", name="Extra scenarios get by id",
+            description="Fetch one scenario by (language, id). Returns the 6-field row: id / domain / concept / action / constraint / failure. Triggers lazy load of the language file on first call.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["language", "id"], "properties": {"language": {"type": "string"}, "id": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:extra.scenarios.get", tags=["scenarios", "extra", "read"],
+            error_codes=["invalid_args", "not_found", "unknown_language"]),
+        SkillSpec(id="extra.scenarios.search", name="Extra scenarios search (per language)",
+            description="Token-overlap search within ONE language. ~49 ms warm on 100k rows. min_score=1.0 default (count shared tokens); 5+ for near-exact matches. Returns ranked hits with score + 6 fields. No embeddings.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["language", "query"], "properties": {"language": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "min_score": {"type": "number", "minimum": 0}}, "additionalProperties": True},
+            executor="builtin:extra.scenarios.search", tags=["scenarios", "extra", "search"],
+            error_codes=["invalid_args", "unknown_language"]),
+        SkillSpec(id="extra.scenarios.random", name="Extra scenarios random sample (drills)",
+            description="Pick N random scenarios from one language. Useful for code review drills, eval, sampling. Deterministic if `seed` is given.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["language"], "properties": {"language": {"type": "string"}, "n": {"type": "integer", "minimum": 1, "maximum": 100}, "seed": {"type": "integer"}}, "additionalProperties": True},
+            executor="builtin:extra.scenarios.random", tags=["scenarios", "extra", "drills"],
+            error_codes=["invalid_args", "unknown_language"]),
+        SkillSpec(id="extra.scenarios.browse", name="Extra scenarios browse paginated",
+            description="Paginate one language (offset/limit). Optional filters: concept / domain / constraint (substring match, case-insensitive).",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["language"], "properties": {"language": {"type": "string"}, "concept": {"type": "string"}, "domain": {"type": "string"}, "constraint": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": True},
+            executor="builtin:extra.scenarios.browse", tags=["scenarios", "extra", "browse"],
+            error_codes=["invalid_args", "unknown_language"]),
     ]
 
 
@@ -250,6 +283,7 @@ def wire_executors() -> None:
     from .clients import scenarios as scn
     from .clients import coding_books_rag as cbr
     from .clients import coding_tasks_corpus as ctc
+    from .clients import extra_scenarios as exs
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
@@ -281,6 +315,12 @@ def wire_executors() -> None:
         "builtin:coding.tasks.search": ctc.coding_tasks_search,
         "builtin:coding.tasks.get": ctc.coding_tasks_get,
         "builtin:coding.tasks.catalog": ctc.coding_tasks_catalog,
+
+        "builtin:extra.scenarios.list": exs.extra_scenarios_list,
+        "builtin:extra.scenarios.get": exs.extra_scenarios_get,
+        "builtin:extra.scenarios.search": exs.extra_scenarios_search,
+        "builtin:extra.scenarios.random": exs.extra_scenarios_random,
+        "builtin:extra.scenarios.browse": exs.extra_scenarios_browse,
     })
 
 
