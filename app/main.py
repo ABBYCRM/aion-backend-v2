@@ -226,7 +226,7 @@ async def skills_debug_scenarios(_: Principal = Depends(authenticated)):
     """Operator-only debug: print resolved path + file existence for
     github_scenarios.csv. Never returns secret values."""
     try:
-        from .skills.clients.github_scenarios import resolve_csv_path
+        from .skills.clients.scenarios import _resolve_scenarios_dir as resolve_csv_path
         candidates = []
         env_override = os.environ.get("AION_GITHUB_SCENARIOS_CSV")
         if env_override:
