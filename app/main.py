@@ -142,6 +142,10 @@ async def lifespan(_: FastAPI):
         audit.record("skills.boot", {"seeded": info.get("seeded"), "db": info.get("db")})
     except Exception as exc:
         audit.record("skills.boot.failed", {"error": str(exc)[:200]})
+    # extra_scenarios / syntax: lazy load per language on first request.
+    # No pre-warm: the 29 .txt files (~400MB total) and 9 syntax files
+    # (~80MB total) are too heavy to block startup. First user request
+    # pays the cold-read cost; subsequent requests are cached.
     yield
     audit.record("aion.shutdown", {})
 

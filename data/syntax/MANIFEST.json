@@ -1,0 +1,125 @@
+{
+  "bundle": "100k_syntax_core_9",
+  "generated_utc": "2026-08-05T06:54:29.630976+00:00",
+  "technology_count": 9,
+  "total_records": 900000,
+  "merge_key": "six-digit ID in column 1",
+  "format": "ID<TAB>construct<TAB>JSON-escaped syntax snippet",
+  "scope_note": "100,000 unique instantiated snippets per technology from ten language-specific construct families; not 100,000 distinct grammar productions.",
+  "independent_final_audit": {
+    "every_record_reread": true,
+    "strict_sequential_ids": true,
+    "every_json_snippet_decoded": true,
+    "full_snippet_uniqueness_per_file": true
+  },
+  "files": [
+    {
+      "technology": "Python",
+      "syntax_file": "python_100k_syntax.txt",
+      "paired_scenario_file": "python_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 8903692,
+      "sha256": "72708bbaa4045e29cc8bd085856c77017b78c721458d1065487266f2f9a4331a",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "JavaScript",
+      "syntax_file": "javascript_100k_syntax.txt",
+      "paired_scenario_file": "javascript_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 7621516,
+      "sha256": "5667b406d5f2a856d0143c0625d4840893cfa861f6d8a166633990e357aad33f",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "TypeScript",
+      "syntax_file": "typescript_100k_syntax.txt",
+      "paired_scenario_file": "typescript_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 9703694,
+      "sha256": "c20f5af95913fea4f8dca3f0eafdca497b52c50626e48dcf49a6e6daca91e581",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "Tailwind CSS",
+      "syntax_file": "tailwind_css_100k_syntax.txt",
+      "paired_scenario_file": "tailwind_css_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 12230242,
+      "sha256": "a41ea1eb575c27342690ffcbf12eb0e122a0c9820e0de010a6a9dcf0cf8ea433",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "C",
+      "syntax_file": "c_100k_syntax.txt",
+      "paired_scenario_file": "c_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 6843685,
+      "sha256": "b5581b99e32af7e215fccbcd8b11261732a29808e82f1da8343edce8b06d510e",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "C++",
+      "syntax_file": "cplusplus_100k_syntax.txt",
+      "paired_scenario_file": "cplusplus_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 7154780,
+      "sha256": "065438fae0e292f3f414e9534c1baa7cf5b6a349952d0b9aa9fa1eb6c3a4cedb",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "Java",
+      "syntax_file": "java_100k_syntax.txt",
+      "paired_scenario_file": "java_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 8645870,
+      "sha256": "6997bbfbca47cb9f95f8a328c8513c5ff5dfd4583cfba9d7a965fc42d3b4e766",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "CSS",
+      "syntax_file": "css_100k_syntax.txt",
+      "paired_scenario_file": "css_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 8905932,
+      "sha256": "57ff58e1789004bded9fc16ec4b4bb7bf1b2545a35662362b0ed4e809f6882d7",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    },
+    {
+      "technology": "HTML",
+      "syntax_file": "html_100k_syntax.txt",
+      "paired_scenario_file": "html_100k_scenarios.txt",
+      "records": 100000,
+      "unique_snippets": 100000,
+      "bytes": 12874086,
+      "sha256": "2937567c840f4ad7acb3ccb83323c1dc77db28e0604eacf1226e850d476faa61",
+      "first_id": "000001",
+      "last_id": "100000",
+      "audit": "PASS"
+    }
+  ]
+}

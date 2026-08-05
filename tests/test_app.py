@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_34_contracts():
+def test_skills_bootstrap_seeds_37_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 34
+    assert info.get("seeded") == 37
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 34
+    assert result.data["count"] >= 37
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 34
+    assert body.get("count") >= 37
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -629,7 +629,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 34
+    assert body["data"]["count"] >= 37
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 34
+    assert body.get("seeded") == 37
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,17 +688,17 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 34
+    assert r2.json().get("seeded") == 37
 
 
 
 
-def test_scenario_bootstrap_seeds_34_contracts():
+def test_scenario_bootstrap_seeds_37_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 34
+    assert info.get("seeded") == 37
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
@@ -1170,11 +1170,11 @@ def test_aion_stack_skill_route_returns_real_rows():
     assert data["chosen"]["score"] >= 1.25
 
 
-def test_aion_stack_skill_routes_34_contracts():
+def test_aion_stack_skill_routes_37_contracts():
     """Bootstrap must seed 25 contracts (was 23, +aion_stack.scenario.match +stack.policy.match)."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 34
+    assert info.get("seeded") == 37
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "aion_stack.scenario.match" in ids
@@ -1502,6 +1502,130 @@ def test_extra_scenarios_lazy_load_only_loaded_languages():
     _load_language("rust")
     _load_language("go")
     assert set(_CACHE.keys()) == {"rust", "go"}, f"expected only rust+go, got {set(_CACHE.keys())}"
+
+
+
+def test_syntax_list_returns_9_technologies():
+    """Operator-claimed: 9 technologies x 100,000 snippets = 900,000 total."""
+    from app.skills.clients.syntax import list_technologies
+    techs = list_technologies()
+    assert len(techs) == 9
+    assert sum(t["count"] for t in techs) == 900_000
+    for t in techs:
+        assert t["count"] == 100_000, f"{t['technology']} has {t['count']}, expected 100,000"
+
+
+def test_syntax_list_via_skill_route():
+    """End-to-end via the skills/run endpoint contract."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("syntax.list", {}))
+    assert result.ok is True
+    assert result.data["technology_count"] == 9
+    assert result.data["total_snippets"] == 900_000
+
+
+def test_syntax_get_by_id():
+    """syntax.get returns id / technology / display / construct / snippet."""
+    from app.skills.clients.syntax import _load_technology
+    loaded = _load_technology("python")
+    rec = loaded["by_id"]["000001"]
+    assert rec["id"] == "000001"
+    assert rec["technology"] == "python"
+    assert rec["display"] == "Python"
+    assert "construct" in rec
+    assert "snippet" in rec
+    assert isinstance(rec["snippet"], str)
+
+
+def test_syntax_get_via_skill_route():
+    """End-to-end: syntax.get python 000001 returns the full row."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("syntax.get", {"technology": "python", "id": "000001"}))
+    assert result.ok is True
+    s = result.data["syntax"]
+    assert s["id"] == "000001"
+    assert s["technology"] == "python"
+
+
+def test_syntax_get_not_found():
+    """syntax.get for a missing id returns ok=false, error_code=not_found."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("syntax.get", {"technology": "python", "id": "999999"}))
+    assert result.data.get("ok") is False
+    assert result.data.get("error_code") == "not_found"
+
+
+def test_syntax_get_unknown_technology():
+    """Unknown technology returns error_code=invalid_args."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("syntax.get", {"technology": "klingon", "id": "000001"}))
+    assert result.data.get("ok") is False
+    assert "unknown_technology:klingon" in str(result.data.get("error_code", ""))
+
+
+def test_syntax_browse_pagination():
+    """syntax.browse paginates within one technology."""
+    from app.skills.clients.syntax import _load_technology
+    loaded = _load_technology("python")
+    page1 = loaded["ordered"][:5]
+    page2 = loaded["ordered"][5:10]
+    assert page1 != page2
+    for rec in page1 + page2:
+        assert rec["technology"] == "python"
+
+
+def test_syntax_browse_with_construct_filter():
+    """syntax.browse filters by construct substring."""
+    from app.skills.clients.syntax import _load_technology
+    loaded = _load_technology("python")
+    # 'class' should match 10,000 records (the 'class' construct)
+    class_rows = [r for r in loaded["ordered"] if "class" in r["construct"].lower()]
+    assert len(class_rows) == 10_000
+    for r in class_rows:
+        assert "class" in r["construct"].lower()
+
+
+def test_syntax_browse_via_skill_route():
+    """End-to-end browse with construct filter returns matching rows."""
+    from app.skills import bootstrap
+    from app.skills.runner import get_runner
+    import asyncio
+    bootstrap()
+    r = get_runner()
+    result = asyncio.run(r.run("syntax.browse", {
+        "technology": "python", "construct": "class", "limit": 5,
+    }))
+    assert result.ok is True
+    assert result.data["count"] == 5
+    assert all("class" in s["construct"].lower() for s in result.data["snippets"])
+    assert result.data["total_after_filter"] == 10_000
+
+
+def test_syntax_snippet_is_json_decodable():
+    """Every snippet must be a valid string (already JSON-decoded on load)."""
+    from app.skills.clients.syntax import _load_technology
+    loaded = _load_technology("typescript")
+    for rec in loaded["ordered"][:50]:
+        assert isinstance(rec["snippet"], str)
+        # TypeScript snippets should contain TypeScript syntax hints
+        s = rec["snippet"]
+        assert any(token in s for token in ("function", "const", "let", "type", "interface", "class", "=>", "import", "export", "async", "= ")), f"snippet lacks TS tokens: {s[:60]!r}"
 
 def test_search_provider_chain_wiring():
     """The module-level web_search must be a ChainedWebSearch wrapping both."""

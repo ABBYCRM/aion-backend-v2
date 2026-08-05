@@ -11,7 +11,7 @@ scenario policy library:
   - scenario.match  (unified, all 5 packs at once)
   - scenario.index  (RAG indexer, 1 pack or all)
 
-Total: 34 contracts on boot.
+Total: 37 contracts on boot.
 """
 from __future__ import annotations
 
@@ -257,6 +257,29 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "required": ["language"], "properties": {"language": {"type": "string"}, "concept": {"type": "string"}, "domain": {"type": "string"}, "constraint": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": True},
             executor="builtin:extra.scenarios.browse", tags=["scenarios", "extra", "browse"],
             error_codes=["invalid_args", "unknown_language"]),
+        # ---- 3 syntax skills (operator core pack, 2026-08-05) ----
+        # 9 technologies x 100,000 snippets = 900,000 JSON-escaped code
+        # examples. Lazy load per technology (~7-13 MB). Pairs with the
+        # extra_scenarios pack: same id 000001..100000 in any of the
+        # 9 languages.
+        SkillSpec(id="syntax.list", name="Syntax examples technology catalog",
+            description="Return the 9-technology syntax catalog (slug / display / count / size_bytes). Cheap. Total: 900,000 JSON-escaped code snippets across Python / JavaScript / TypeScript / Tailwind CSS / C / C++ / Java / CSS / HTML.",
+            side_effect="read",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": True},
+            executor="builtin:syntax.list", tags=["syntax", "catalog"],
+            error_codes=["data_dir_missing"]),
+        SkillSpec(id="syntax.get", name="Syntax examples get by id",
+            description="Fetch one syntax row by (technology, id). Returns id / technology / display / construct / snippet (decoded from JSON). Triggers lazy load of the technology file on first call.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["technology", "id"], "properties": {"technology": {"type": "string"}, "id": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:syntax.get", tags=["syntax", "read"],
+            error_codes=["invalid_args", "not_found", "unknown_technology"]),
+        SkillSpec(id="syntax.browse", name="Syntax examples browse paginated",
+            description="Paginate one technology (offset/limit). Optional `construct` filter (substring match, case-insensitive). Returns the full snippet text per row.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["technology"], "properties": {"technology": {"type": "string"}, "construct": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": True},
+            executor="builtin:syntax.browse", tags=["syntax", "browse"],
+            error_codes=["invalid_args", "unknown_technology"]),
     ]
 
 
@@ -284,6 +307,7 @@ def wire_executors() -> None:
     from .clients import coding_books_rag as cbr
     from .clients import coding_tasks_corpus as ctc
     from .clients import extra_scenarios as exs
+    from .clients import syntax as syn
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
@@ -321,6 +345,10 @@ def wire_executors() -> None:
         "builtin:extra.scenarios.search": exs.extra_scenarios_search,
         "builtin:extra.scenarios.random": exs.extra_scenarios_random,
         "builtin:extra.scenarios.browse": exs.extra_scenarios_browse,
+
+        "builtin:syntax.list": syn.syntax_list,
+        "builtin:syntax.get": syn.syntax_get,
+        "builtin:syntax.browse": syn.syntax_browse,
     })
 
 
