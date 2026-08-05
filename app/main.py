@@ -26,7 +26,10 @@ from .vault import KNOWN_KEYS as VAULT_KNOWN_KEYS, VaultError, VaultNotConfigure
 from . import brain_client
 from .gallery import gallery
 
-_GITHUB_URL = re.compile(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.I)
+_GITHUB_URL = re.compile(
+    r"https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)",
+    re.I,
+)
 
 class TextPart(BaseModel):
     type: Literal["text"]
@@ -583,7 +586,42 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
         else:
             yield _sse(brain_client.brain_sse.disabled())
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
-        for event in tool_events: yield _sse(event)
+        for event in tool_events:
+            yield _sse(event)
+
+        # Hard stop on tool failure: never let the LLM invent analysis
+        # without evidence. Stream a factual refusal and return — Brain,
+        # OpenAI, NVIDIA, the whole chain is skipped for this turn.
+        if tool_errors and (search_query or repository):
+            text = _defer_tool_failure_text(
+                tool_errors,
+                repository=repository or "",
+                search_query=search_query or "",
+            )
+            yield _sse({"type": "open", "provider": "aion", "model": "defer-gate"})
+            chunk = 48
+            for i in range(0, len(text), chunk):
+                yield _sse({"type": "delta", "text": text[i : i + chunk]})
+                await asyncio.sleep(0)
+            yield _sse({
+                "type": "done",
+                "streaming": False,
+                "provider": "aion",
+                "model": "defer-gate",
+                "finish_reason": "defer_tool_failure",
+            })
+            audit.record(
+                "chat.deferred_tool_failure",
+                {
+                    "subject": principal.subject,
+                    "request_id": mission.request_id,
+                    "errors": tool_errors[:5],
+                    "repository": repository or None,
+                },
+            )
+            yield b"data: [DONE]\n\n"
+            return
+
         if use_brain:
             # Stream from Brain. AION keeps the local system prompt, tool
             # results, and notes context. Brain does the 7-law re-decision
@@ -777,8 +815,43 @@ async def gallery_raw(item_id: str, principal: Principal = Depends(authenticated
 def _sse(payload): return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
 def _search_query(enabled, text):
     stripped = text.strip(); return stripped[8:].strip()[:400] if stripped.lower().startswith("/search ") else stripped[:400] if enabled else ""
+def _defer_tool_failure_text(tool_errors, *, repository: str = "", search_query: str = "") -> str:
+    """Hardcoded refusal streamed to the client when the kernel DEFERs
+    because a tool was requested and errored. The LLM never sees this
+    prompt — we stream this directly so the model can't invent filler.
+    """
+    lines = [
+        "DEFER — external evidence was required and the tool failed.",
+        "I will not invent a repository review or generic checklist without reads.",
+        "",
+        "Tool errors:",
+    ]
+    for err in tool_errors:
+        lines.append(f"- {err}")
+    if repository:
+        lines.append("")
+        lines.append(f"Requested repository: `{repository}`")
+        joined = " ".join(tool_errors)
+        if "github_repository_not_allowed" in joined:
+            lines.append(
+                "This repo is outside `GITHUB_ALLOWED_REPOSITORIES`. "
+                "An operator must allowlist it, or you can paste the README / file tree here."
+            )
+        elif "github_not_configured" in joined:
+            lines.append("GitHub is not configured on this backend (missing token/app).")
+        else:
+            lines.append("See the error above for the cause.")
+    if search_query:
+        lines.append(f"Search query: {search_query}")
+    lines.append("")
+    lines.append(
+        "Next step: allowlist the repo, fix tool config, or paste the source text you want reviewed."
+    )
+    return "\n".join(lines)
+
+
 def _github_request(body, text):
-    repository = body.github_repository or ""; mode = "repository"; argument = ""; stripped = text.strip()
+    repository = (body.github_repository or "").strip(); mode = "repository"; argument = ""; stripped = (text or "").strip()
     if stripped.lower().startswith("/github "):
         command = stripped[8:].strip().split(maxsplit=2)
         if command: repository = command[0]
@@ -787,9 +860,13 @@ def _github_request(body, text):
             if action in {"issues", "repo", "repository"}: mode = "issues" if action == "issues" else "repository"
             elif action == "file" and len(command) == 3: mode, argument = "file", command[2]
             elif action == "search" and len(command) == 3: mode, argument = "search", command[2]
-    elif body.github_path: mode, argument = "file", body.github_path
-    elif body.github_query: mode, argument = "search", body.github_query
+    elif getattr(body, "github_path", None): mode, argument = "file", body.github_path
+    elif getattr(body, "github_query", None): mode, argument = "search", body.github_query
     elif not repository:
-        match = _GITHUB_URL.search(text)
-        if match: repository = match.group(0)
+        match = _GITHUB_URL.search(text or "")
+        if match: repository = f"{match.group('owner')}/{match.group('repo')}"
+    if repository.startswith("http"):
+        m = _GITHUB_URL.search(repository)
+        if m: repository = f"{m.group('owner')}/{m.group('repo')}"
+    repository = repository.removesuffix(".git")
     return repository, mode, argument

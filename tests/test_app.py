@@ -245,7 +245,8 @@ def test_system_prompt_surfaces_tool_errors():
 def test_chat_defers_when_github_tool_blocked(_vault_db, monkeypatch):
     """The same prompt that produced the soft-hallucination bug
     (https://github.com/ABBYCRM/robot-vacuum ...) MUST now return
-    DEFER when GitHub is requested and errored.
+    DEFER AND the LLM is NEVER called. The hard DEFER gate streams a
+    factual refusal directly and the chat ends.
     """
     monkeypatch.setenv("GITHUB_ALLOWED_REPOSITORIES", "ABBYCRM/aion-backend-v2")
     import importlib
@@ -263,16 +264,52 @@ def test_chat_defers_when_github_tool_blocked(_vault_db, monkeypatch):
         import json as _json
         decision_state = None
         tool_errors = []
+        saw_open = False
+        saw_done = False
+        llm_attempt_seen = False
+        refusal_text = []
         for line in r.iter_lines():
             if not line: continue
             if isinstance(line, bytes): line = line.decode("utf-8", errors="ignore")
             if line.startswith("data: "):
-                try: evt = _json.loads(line[6:])
+                payload = line[6:]
+                if payload == "[DONE]": continue
+                try: evt = _json.loads(payload)
                 except Exception: continue
-                if evt.get("type") == "decision": decision_state = evt.get("decision", {}).get("state")
-                elif evt.get("type") == "tool_error": tool_errors.append(evt)
+                t = evt.get("type")
+                if t == "decision": decision_state = evt.get("decision", {}).get("state")
+                elif t == "tool_error": tool_errors.append(evt)
+                elif t == "open": saw_open = True
+                elif t == "done": saw_done = True
+                elif t == "attempt": llm_attempt_seen = True
+                elif t == "delta": refusal_text.append(evt.get("text", ""))
+        # 1. DEFER is the kernel state
         assert decision_state == "DEFER", f"expected DEFER, got {decision_state}; tool_errors: {tool_errors}"
-        assert any("not allowlist" in (t.get("message", "").lower() + t.get("tool", "").lower()) or "github_repository_not_allowed" in t.get("message", "").lower() for t in tool_errors), f"expected not-allowlisted tool error, got: {tool_errors}"
+        # 2. The tool error was reported
+        assert any("github_repository_not_allowed" in t.get("message", "").lower() or "not allowlist" in t.get("message", "").lower() for t in tool_errors), f"expected not-allowlisted tool error, got: {tool_errors}"
+        # 3. The hard DEFER gate opened, sent deltas, and closed
+        assert saw_open, "expected open event from the defer-gate"
+        assert saw_done, "expected done event from the defer-gate"
+        # 4. The LLM was NEVER called (no attempt event)
+        assert not llm_attempt_seen, "LLM was called despite tool failure — hard DEFER gate missing"
+        # 5. The refusal text contains the repository name + the fix path
+        full = "".join(refusal_text)
+        assert "DEFER" in full
+        assert "robot-vacuum" in full
+        assert "GITHUB_ALLOWED_REPOSITORIES" in full
+
+
+def test_defer_tool_failure_text_mentions_repo_and_fix():
+    from app.main import _defer_tool_failure_text
+    text = _defer_tool_failure_text(["github_repository_not_allowed: x/y not on GITHUB_ALLOWED_REPOSITORIES"], repository="x/y")
+    assert "DEFER" in text
+    assert "x/y" in text
+    assert "GITHUB_ALLOWED_REPOSITORIES" in text
+    # No tool error -> no repo-specific hint
+    text2 = _defer_tool_failure_text(["github_http_500"], repository="x/y")
+    assert "DEFER" in text2
+    assert "x/y" in text2
+    assert "See the error above" in text2
 
 
 # ---------------------------------------------------------------------------
