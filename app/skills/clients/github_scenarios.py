@@ -23,6 +23,30 @@ DEFAULT_CSV_PATH = os.environ.get("AION_GITHUB_SCENARIOS_CSV") or (
 )
 
 
+def resolve_csv_path() -> Path:
+    """Pick the first CSV path that exists, in priority order:
+    1. $AION_GITHUB_SCENARIOS_CSV (operator override)
+    2. $AION_DATA_DIR/github_scenarios.csv (DO volume)
+    3. /app/data/github_scenarios.csv (Docker image)
+    4. ./data/github_scenarios.csv (local dev)
+    Returns the first path that exists, falling back to the highest-priority
+    candidate so the caller can produce a clear load_failed error.
+    """
+    candidates: list[Path] = []
+    env_override = os.environ.get("AION_GITHUB_SCENARIOS_CSV")
+    if env_override:
+        candidates.append(Path(env_override))
+    data_dir = os.environ.get("AION_DATA_DIR")
+    if data_dir:
+        candidates.append(Path(data_dir) / "github_scenarios.csv")
+    candidates.append(Path("/app/data/github_scenarios.csv"))
+    candidates.append(Path("./data/github_scenarios.csv"))
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0] if candidates else Path("./data/github_scenarios.csv")
+
+
 def _normalize(value: str) -> str:
     return re.sub(r"\W+", " ", (value or "").lower()).strip()
 
@@ -67,7 +91,7 @@ def match_scenarios(
     condition: str | None = None,
     category: str | None = None,
     context: dict[str, Any] | None = None,
-    csv_path: str | Path = DEFAULT_CSV_PATH,
+    csv_path: str | Path | None = None,
     limit: int = 5,
 ) -> dict[str, Any]:
     """Match the trigger (+ optional condition / category / context) against
@@ -77,7 +101,8 @@ def match_scenarios(
         raise SkillError("invalid_args", "missing_required:trigger")
     cond = (condition or "").strip()
     cat = (category or "").strip().lower() or None
-    rows = _load_rows(csv_path)
+    effective_csv = Path(csv_path) if csv_path else resolve_csv_path()
+    rows = _load_rows(effective_csv)
     if not rows:
         raise SkillError("github_scenarios_empty", f"csv_empty:{csv_path}")
     # Filter
@@ -123,7 +148,7 @@ def match_scenarios(
         "matches": top,
         "chosen": chosen,
         "reason": reason,
-        "csv_path": str(csv_path),
+        "csv_path": str(effective_csv),
         "csv_rows_total": len(rows),
     }
 
@@ -133,12 +158,13 @@ def match_scenarios(
 async def github_scenario_match(
     args: dict[str, Any], ctx: dict[str, Any]
 ) -> dict[str, Any]:
+    explicit = args.get("csv_path")
     return match_scenarios(
         trigger=args.get("trigger", ""),
         condition=args.get("condition"),
         category=args.get("category"),
         context=args.get("context"),
-        csv_path=args.get("csv_path") or DEFAULT_CSV_PATH,
+        csv_path=explicit or None,
         limit=int(args.get("limit") or 5),
     )
 
@@ -149,7 +175,9 @@ async def github_scenario_index(
     """Subroutine: index the CSV into the local RAG 'github_policy' collection
     so rag.skills.search can find scenarios by natural language too."""
     from ..rag.store import get_rag_store
-    rows = _load_rows(args.get("csv_path") or DEFAULT_CSV_PATH)
+    explicit = args.get("csv_path")
+    effective_csv = Path(explicit) if explicit else resolve_csv_path()
+    rows = _load_rows(effective_csv)
     if not rows:
         raise SkillError("github_scenarios_empty", f"csv_empty:{args.get('csv_path') or DEFAULT_CSV_PATH}")
     store = get_rag_store()
@@ -166,4 +194,4 @@ async def github_scenario_index(
         )
         store.upsert("github_policy", text, source=r.get("id", ""), meta={"id": r.get("id", ""), "category": r.get("category", "")})
         n += 1
-    return {"indexed": n, "collection": "github_policy", "csv_rows_total": len(rows)}
+    return {"indexed": n, "collection": "github_policy", "csv_rows_total": len(rows), "csv_path": str(effective_csv)}
