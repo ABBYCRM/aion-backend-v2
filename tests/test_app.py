@@ -155,6 +155,56 @@ def test_input_reference_must_be_data_url():
             assert body.get("ok") is False
 
 
+
+
+
+def test_brain_status_returns_probe(_vault_db, monkeypatch):
+    """GET /api/brain/status must return {ok,brain:{...}} even when Brain is
+    disabled — the pill must always have a state to render."""
+    import importlib
+    from app import settings, main as main_mod
+    # Default: brain_enabled=False
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.get("/api/brain/status", headers=USER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    brain = body.get("brain", {})
+    # brain_enabled=False in default test env -> enabled=False reachable=False
+    assert brain.get("enabled") is False
+    assert brain.get("reachable") is False
+    assert brain.get("error") == "disabled"
+
+
+def test_brain_status_reports_unreachable_when_brain_down(_vault_db, monkeypatch):
+    """When brain_enabled=true + URL is unreachable, /api/brain/status must
+    return reachable=False with an error, never raise."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:1")
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    monkeypatch.setenv("AION_BRAIN_REQUIRED", "false")
+    import importlib
+    from app import settings, main as main_mod, brain_client
+    importlib.reload(settings)  # rebuilds settings.settings
+    importlib.reload(brain_client)  # picks up new settings reference
+    importlib.reload(main_mod)  # re-imports settings + brain_client into main
+    client = TestClient(main_mod.app)
+    r = client.get("/api/brain/status", headers=USER_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    brain = body.get("brain", {})
+    assert brain.get("enabled") is True
+    assert brain.get("reachable") is False
+    assert brain.get("latency_ms") is not None
+    assert brain.get("error")
+    # The X-AION-Brain headers are added by the /api/decision and /api/chat
+    # routes; /api/brain/status itself does not need them. CORS
+    # expose_headers is verified at the live deploy.
+
+
 # ---------------------------------------------------------------------------
 # DuckDuckGo fallback search (no BRAVE_API_KEY required)
 # ---------------------------------------------------------------------------
@@ -517,9 +567,17 @@ def test_llm_configured_providers_sees_vault_only_keys(_vault_db, monkeypatch):
 # ===========================================================================
 
 
-def test_brain_not_configured_returns_unavailable(_vault_db):
-    from app import brain_client
-    # Default settings have brain_enabled=False
+def test_brain_not_configured_returns_unavailable(_vault_db, monkeypatch):
+    """The default test env (no AION_BRAIN_* set) must leave Brain
+    unconfigured. Defensively re-assert after reloading so the
+    singleton picked up by brain_client is the post-reload one."""
+    monkeypatch.delenv("AION_BRAIN_ENABLED", raising=False)
+    monkeypatch.delenv("AION_BRAIN_URL", raising=False)
+    monkeypatch.delenv("AION_BRAIN_KEY", raising=False)
+    import importlib
+    from app import settings, brain_client
+    importlib.reload(settings)
+    importlib.reload(brain_client)
     assert brain_client.is_configured() is False
 
 

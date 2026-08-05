@@ -96,6 +96,101 @@ async def state() -> dict[str, Any]:
     return r.json()
 
 
+async def probe_brain(timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Batched health probe for the UI topbar. Never raises; returns a
+    dict the frontend can render directly.
+
+    Shape (matches the install contract in docs/PROTOCOL.md):
+        {
+          "enabled": bool,
+          "reachable": bool,
+          "url_host": str | None,
+          "latency_ms": int | None,
+          "version": str | None,
+          "last_decision": str | None,
+          "agent_running": bool,
+          "providers": list[str] | None,
+          "primary_model": str | None,
+          "error": str | None,
+        }
+
+    - If AION_BRAIN_ENABLED is false, returns enabled=False, reachable=False.
+    - If AION_BRAIN_URL is missing, returns enabled=True, reachable=False,
+      error="AION_BRAIN_URL not set".
+    - Otherwise hits GET /healthz. On 2xx, also hits GET /api/state to
+      pick up the version + providers + last decision.
+    """
+    if not settings.brain_enabled:
+        return {"enabled": False, "reachable": False, "url_host": None, "latency_ms": None, "version": None, "last_decision": None, "agent_running": False, "providers": None, "primary_model": None, "error": "disabled"}
+    if not settings.brain_url or not settings.brain_service_key:
+        return {"enabled": True, "reachable": False, "url_host": None, "latency_ms": None, "version": None, "last_decision": None, "agent_running": False, "providers": None, "primary_model": None, "error": "AION_BRAIN_URL or AION_BRAIN_KEY not set"}
+    url_host = settings.brain_url.split("://", 1)[-1].split("/", 1)[0]
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            r = await client.get(f"{_base()}/healthz", headers=_headers())
+            latency = int((time.perf_counter() - started) * 1000)
+            if r.status_code >= 400:
+                return {"enabled": True, "reachable": False, "url_host": url_host, "latency_ms": latency, "version": None, "last_decision": None, "agent_running": False, "providers": None, "primary_model": None, "error": f"healthz_{r.status_code}"}
+            version = None
+            try:
+                hbody = r.json()
+                version = hbody.get("version")
+            except Exception:
+                pass
+            # Best-effort state fetch
+            providers = None
+            primary_model = None
+            try:
+                s = await client.get(f"{_base()}/api/state", headers=_headers())
+                if s.status_code == 200:
+                    sj = s.json()
+                    providers = sj.get("providers")
+                    primary_model = sj.get("primary_model")
+            except Exception:
+                pass
+            return {"enabled": True, "reachable": True, "url_host": url_host, "latency_ms": latency, "version": version, "last_decision": None, "agent_running": False, "providers": providers, "primary_model": primary_model, "error": None}
+    except Exception as exc:
+        latency = int((time.perf_counter() - started) * 1000)
+        return {"enabled": True, "reachable": False, "url_host": url_host, "latency_ms": latency, "version": None, "last_decision": None, "agent_running": False, "providers": None, "primary_model": None, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+async def timed_decision(*, user_input: str, history: list[dict[str, Any]] | None = None, metadata: dict[str, Any] | None = None) -> tuple[dict[str, Any], int, str]:
+    """Wrapper around decision() that returns (body, latency_ms, status)
+    so the caller can attach X-AION-Brain-* response headers."""
+    started = time.time()
+    try:
+        body = await decision(user_input=user_input, history=history, metadata=metadata)
+        return body, int((time.time() - started) * 1000), "active"
+    except BrainUnavailable as exc:
+        return {"ok": False, "error": str(exc), "kind": "brain_unavailable"}, int((time.time() - started) * 1000), "down"
+    except BrainAuthRejected as exc:
+        return {"ok": False, "error": str(exc), "kind": "brain_auth_rejected"}, int((time.time() - started) * 1000), "down"
+    except BrainBadResponse as exc:
+        return {"ok": False, "error": str(exc), "kind": "brain_bad_response"}, int((time.time() - started) * 1000), "down"
+
+
+class _SseEvent:
+    """Tiny helper to build a brain SSE event dict."""
+    @staticmethod
+    def active(latency_ms: int) -> dict[str, Any]:
+        return {"type": "brain", "status": "active", "latency_ms": latency_ms, "source": "aion-brain"}
+
+    @staticmethod
+    def down(error: str | None, latency_ms: int | None = None) -> dict[str, Any]:
+        return {"type": "brain", "status": "down", "latency_ms": latency_ms, "error": (error or "")[:200]}
+
+    @staticmethod
+    def disabled() -> dict[str, Any]:
+        return {"type": "brain", "status": "disabled", "latency_ms": None}
+
+    @staticmethod
+    def skipped(reason: str) -> dict[str, Any]:
+        return {"type": "brain", "status": "skipped", "latency_ms": None, "reason": reason[:200]}
+
+brain_sse = _SseEvent()  # module-level singleton
+
+
 async def decision(*, user_input: str, history: list[dict[str, Any]] | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     """POST /api/decision — 7-law kernel decision for one user_input.
 

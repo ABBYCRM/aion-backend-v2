@@ -136,7 +136,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=f"{settings.app_name} Runtime", version=settings.app_version, description="Authenticated AION runtime with web and GitHub tools", docs_url=None if settings.environment == "production" else "/docs", redoc_url=None, lifespan=lifespan)
 app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
-app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"], max_age=600)
+app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-AION-Key", "X-AION-Confirm"], expose_headers=["X-AION-Brain", "X-AION-Brain-Latency-Ms", "X-AION-Brain-Decision", "X-Request-Id"], max_age=600)
 
 @app.exception_handler(ToolConfigurationError)
 async def tool_config(_: Request, exc: ToolConfigurationError): return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "tool_not_configured"})
@@ -166,6 +166,25 @@ async def models_all(_: Principal = Depends(authenticated)):
     return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
 @app.get("/api/audit/recent")
 async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
+
+
+# ===========================================================================
+# Brain-link visual signal — AION <-> Aion-Brain topbar + per-message badge
+# ===========================================================================
+
+@app.get("/api/brain/status")
+async def brain_status(_: Principal = Depends(authenticated)):
+    """Batched health probe for the UI topbar. Never raises."""
+    brain = await brain_client.probe_brain()
+    return {"ok": True, "brain": brain}
+
+
+@app.post("/api/brain/probe")
+async def brain_probe(_: Principal = Depends(require_admin)):
+    """Admin-only: force a fresh probe + audit-log the result."""
+    brain = await brain_client.probe_brain()
+    audit.record("brain.probe", brain)
+    return {"ok": True, "brain": brain}
 
 @app.get("/api/notes/status")
 async def notes_status(_: Principal = Depends(authenticated)):
@@ -199,15 +218,23 @@ async def decision(body: DecisionRequest, principal: Principal = Depends(authent
     # If Brain is wired in, delegate the kernel decision to it. The
     # Python kernel stays as a fallback when Brain is disabled.
     if brain_client.is_configured():
-        try:
-            result = await brain_client.decision(user_input=body.user_input, history=history, metadata={"source": "aion.python.backend", "app_version": settings.app_version, "subject": principal.subject})
-            audit.record("kernel.decision.brain", {"subject": principal.subject, "state": result.get("decision", {}).get("state")})
-            return result
-        except (brain_client.BrainUnavailable, brain_client.BrainAuthRejected, brain_client.BrainBadResponse) as exc:
-            audit.record("kernel.decision.brain.failed", {"subject": principal.subject, "error": str(exc)[:200]})
-            if settings.brain_required:
-                return JSONResponse(status_code=200, content={"ok": False, "error": f"brain_unavailable: {exc}", "kind": "brain_unavailable"})
-            # Fall through to local kernel
+        body_out, latency_ms, status = await brain_client.timed_decision(user_input=body.user_input, history=history, metadata={"source": "aion.python.backend", "app_version": settings.app_version, "subject": principal.subject})
+        if status == "active":
+            audit.record("kernel.decision.brain", {"subject": principal.subject, "state": body_out.get("decision", {}).get("state"), "latency_ms": latency_ms})
+            return JSONResponse(
+                status_code=200,
+                content=body_out,
+                headers={"X-AION-Brain": "active", "X-AION-Brain-Latency-Ms": str(latency_ms), "X-AION-Brain-Decision": body_out.get("decision", {}).get("state", "UNKNOWN")},
+            )
+        # status == "down" — record + check brain_required
+        audit.record("kernel.decision.brain.failed", {"subject": principal.subject, "error": body_out.get("error"), "latency_ms": latency_ms})
+        if settings.brain_required:
+            return JSONResponse(status_code=200, content=body_out, headers={"X-AION-Brain": "down", "X-AION-Brain-Latency-Ms": str(latency_ms)})
+        # Fall through to local kernel
+    elif not settings.brain_enabled:
+        # User explicitly turned off Brain. Record the SSE event for the
+        # topbar pill so the frontend can show BRAIN OFF.
+        audit.record("kernel.decision.brain.disabled", {"subject": principal.subject})
     context = MissionContext(user_input=body.user_input, history=history)
     result = resolve_decision(context)
     audit.record("kernel.decision", {"subject": principal.subject, "request_id": context.request_id, "state": result.state.value})
@@ -531,7 +558,22 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     except AllProvidersFailed as exc: return JSONResponse(status_code=200, content={"ok": False, "error": str(exc), "kind": "all_providers_failed"})
     audit.record("chat.started", {"subject": principal.subject, "request_id": mission.request_id, "message_count": len(body.messages), "web_search": bool(search_query), "github": bool(repository), "brain": brain_client.is_configured()})
     use_brain = brain_client.is_configured() and not settings.brain_decision_only  # brain_decision_only means: use brain for /api/decision only, not /api/chat
+    # Probe Brain once to capture latency for the SSE brain event + the
+    # X-AION-Brain-Latency-Ms response header. Done synchronously here so
+    # the SSE brain event carries the right value; the chat stream itself
+    # does the real work below.
+    brain_probe_at_decision: dict[str, Any] = {}
+    if brain_client.is_configured():
+        brain_probe_at_decision = await brain_client.probe_brain(timeout_seconds=2.0)
     async def events() -> AsyncIterator[bytes]:
+        # Brain-link signal (BEFORE decision so the UI lights up first).
+        if brain_client.is_configured():
+            if brain_probe_at_decision.get("reachable"):
+                yield _sse(brain_client.brain_sse.active(brain_probe_at_decision.get("latency_ms") or 0))
+            else:
+                yield _sse(brain_client.brain_sse.down(brain_probe_at_decision.get("error") or "unreachable", brain_probe_at_decision.get("latency_ms")))
+        else:
+            yield _sse(brain_client.brain_sse.disabled())
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
         for event in tool_events: yield _sse(event)
         if use_brain:
@@ -589,7 +631,14 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             except AllProvidersFailed as exc:
                 yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
         yield b"data: [DONE]\n\n"
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value})
+    stream_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value}
+    if brain_probe_at_decision:
+        stream_headers["X-AION-Brain"] = "active" if brain_probe_at_decision.get("reachable") else "down"
+        if brain_probe_at_decision.get("latency_ms") is not None:
+            stream_headers["X-AION-Brain-Latency-Ms"] = str(brain_probe_at_decision.get("latency_ms"))
+        if brain_probe_at_decision.get("reachable") is False and brain_probe_at_decision.get("error"):
+            stream_headers["X-AION-Brain-Error"] = str(brain_probe_at_decision.get("error"))[:200]
+    return StreamingResponse(events(), media_type="text/event-stream", headers=stream_headers)
 
 # ===========================================================================
 # Vault — admin-scoped secret management
