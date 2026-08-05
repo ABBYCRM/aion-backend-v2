@@ -1,4 +1,26 @@
-"""Web search skill clients: Tavily, Exa (env-configured)."""
+"""Web search skill clients: Tavily, Exa (env-configured).
+
+DESIGN NOTE — there are TWO web search paths in AION, by design:
+
+  1. CHAT/SLASH PATH (app/tools.py -> ChainedWebSearch -> web_search)
+     - Used by: /api/chat with web_search=true, /api/search endpoint
+     - Providers: BRAVE_API_KEY first, then DuckDuckGo fallback
+     - Returns: WebResult objects with score, published_at, raw snippet
+     - This is the OPERATOR chat experience
+
+  2. SKILL PATH (this file, wired to web.search SkillSpec)
+     - Used by: /api/skills/run with skill_id="web.search"
+               (admin/operator programmatic callers, NOT chat)
+     - Providers: TAVILY_API_KEY first, then EXA_API_KEY
+     - Returns: minimal {title, url, snippet}
+     - This is the OPERATOR-AUTOMATION experience
+
+Why two stacks: chat needs score + freshness + site: filters;
+skill path is a thin wrapper for the operator's "I want a clean
+search API for my own agents" use case. They share NO code on
+purpose so a Tavily outage does not break chat, and a Brave key
+rotation does not break the skill catalog.
+"""
 from __future__ import annotations
 
 from typing import Any

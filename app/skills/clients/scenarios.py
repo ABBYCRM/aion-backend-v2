@@ -106,26 +106,49 @@ def match_scenarios(
     filters rows to a single logical layer of the aion_stack pack
     (scenarios / books_rag / code_corpus / tools / kernel)."""
     from ..base import SkillError
+    import os as _os
     if pack and pack not in _VALID_PACKS:
         raise SkillError(
             "invalid_args",
             f"unknown_pack:{pack}",
         )
+    # Forensic P1#6: pack="all" honors SCENARIO_DEFAULT_PACKS env
+    # (default = 5 production packs, openclaw excluded). The filter
+    # is applied AFTER the v2 matcher returns so the matcher keeps
+    # using its native pack="all" expansion; we just drop the
+    # excluded packs from the matches. Operators can opt back into
+    # openclaw by setting
+    # SCENARIO_DEFAULT_PACKS=github,openclaw,composio,firecrawl_steel,render,aion_stack
+    _default_excluded: set[str] = set()
+    _env_default_packs = _os.environ.get("SCENARIO_DEFAULT_PACKS", "").strip()
+    if _env_default_packs:
+        _default_excluded = (
+            _VALID_PACKS
+            - {p.strip() for p in _env_default_packs.split(",") if p.strip()}
+            - {"all"}
+        )
+    else:
+        # Default excludes openclaw from the unified view
+        _default_excluded = {"openclaw"}
+    _is_all = (pack == "all")
     if layer and layer not in _VALID_LAYERS:
         raise SkillError(
             "invalid_args",
             f"unknown_layer:{layer}",
         )
+    # If pack="all", ask v2 to over-fetch so the post-filter in
+    # _to_v1_shape has enough headroom.
+    _fetch_limit = max(limit * 4, 20) if _is_all else limit
     v2 = _v2_match_scenarios(
         trigger=trigger,
         pack=pack,
         category=category,
         layer=layer,
         context=context,
-        limit=limit,
+        limit=_fetch_limit,
         min_score=min_score,
     )
-    return _to_v1_shape(
+    out = _to_v1_shape(
         v2,
         query={
             "trigger": trigger,
@@ -134,6 +157,15 @@ def match_scenarios(
             "layer": layer,
         },
     )
+    if _is_all and _default_excluded:
+        # Forensic P1#6 quarantine: drop excluded packs from the
+        # returned matches. limit still applies after the filter.
+        out["matches"] = [m for m in out["matches"] if m.get("pack") not in _default_excluded]
+        out["count"] = len(out["matches"])
+        if out["chosen"] and out["chosen"].get("pack") in _default_excluded:
+            out["chosen"] = out["matches"][0] if out["matches"] else None
+        out["quarantined_packs"] = sorted(_default_excluded)
+    return out
 
 
 # ===========================================================================

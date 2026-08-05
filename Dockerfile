@@ -16,6 +16,10 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
 COPY --chown=aion:aion app ./app
+# /app/data = READ-ONLY shipped corpus (CSVs, JSONL catalogs). Mounted as image
+# layer, replaced on every redeploy. Anything that should PERSIST across
+# deploys (RAG indexes, sqlite notes, audit log) must go under
+# $AION_DATA_DIR (/var/data) which is a mounted volume on DO.
 COPY --chown=aion:aion data ./data
 
 USER aion

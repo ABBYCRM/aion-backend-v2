@@ -2617,3 +2617,68 @@ def test_chat_no_corpus_when_no_intent(_vault_db, monkeypatch):
         # No corpus tool in the SSE stream
         for corpus_tool in ("extra_scenarios", "coding_tasks", "coding_books"):
             assert f'"tool":"{corpus_tool}"' not in text, f"{corpus_tool} should not have fired for non-corpus intent"
+
+
+# =============================================================================
+# Forensic P1#6: OpenClaw pack quarantine via SCENARIO_DEFAULT_PACKS
+# =============================================================================
+
+def test_scenario_match_all_excludes_openclaw_by_default(_vault_db, monkeypatch):
+    """scenario.match pack="all" must NOT return openclaw rows by default.
+    This is the forensic P1#6 quarantine: openclaw stays reachable via
+    its dedicated skill but does not auto-fire on chat errors via the
+    unified view."""
+    from app.skills.clients.scenarios import match_scenarios
+    # Trigger that should match something in openclaw if openclaw were included
+    # (openclaw has scenarios about messaging channels / agent gateway).
+    result = match_scenarios(trigger="channel routing", pack="all", limit=10)
+    for m in result["matches"]:
+        assert m["pack"] != "openclaw", f"openclaw leaked into pack='all' default: {m}"
+    # The result should still note what was quarantined
+    assert "openclaw" in result.get("quarantined_packs", [])
+
+
+def test_scenario_match_all_includes_openclaw_when_env_set(_vault_db, monkeypatch):
+    """Setting SCENARIO_DEFAULT_PACKS to include openclaw re-enables it
+    in the unified pack='all' view. This is the operator opt-in path."""
+    monkeypatch.setenv("SCENARIO_DEFAULT_PACKS", "github,openclaw,composio,firecrawl_steel,render,aion_stack")
+    from app.skills.clients.scenarios import match_scenarios
+    result = match_scenarios(trigger="messaging channel agent", pack="all", limit=10)
+    # openclaw is now allowed; at minimum it should be eligible
+    assert result.get("quarantined_packs") is None or "openclaw" not in result["quarantined_packs"]
+
+
+def test_scenario_match_specific_pack_unaffected_by_quarantine(_vault_db, monkeypatch):
+    """Direct openclaw.scenario.match call must still work — the
+    quarantine is ONLY for pack='all'."""
+    from app.skills.clients.scenarios import match_scenarios
+    # Direct call to openclaw pack — must work, not blocked
+    result = match_scenarios(trigger="channel routing", pack="openclaw", limit=5)
+    # Even with zero hits, the call must not raise
+    assert "matches" in result
+    assert "count" in result
+
+
+# =============================================================================
+# Forensic P1#7: data/github_scenarios.csv is a symlink to
+# data/scenarios/github_scenarios.csv (canonical). Drift impossible.
+# =============================================================================
+
+def test_github_scenarios_root_is_symlink_to_canonical():
+    """Forensic P1#7: the root-level data/github_scenarios.csv must
+    be a symlink to the canonical data/scenarios/github_scenarios.csv
+    so editing one updates the other. The /api/skills/debug/scenarios
+    endpoint reads both, so drift would silently break the debug view.
+    """
+    import os
+    root = "data/github_scenarios.csv"
+    canon = "data/scenarios/github_scenarios.csv"
+    assert os.path.islink(root), f"{root} is not a symlink — drift risk"
+    resolved = os.readlink(root)
+    assert resolved == "scenarios/github_scenarios.csv", (
+        f"{root} points to {resolved!r}, expected scenarios/github_scenarios.csv"
+    )
+    # Both must be readable and identical
+    with open(root) as f: root_content = f.read()
+    with open(canon) as f: canon_content = f.read()
+    assert root_content == canon_content
