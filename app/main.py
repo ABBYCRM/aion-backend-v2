@@ -299,7 +299,7 @@ async def security_health(_: Principal = Depends(authenticated)):
 
     # Vault status (no values, just state)
     try:
-        from .vault import VAULT_KNOWN_KEYS, vault
+        from .vault import KNOWN_KEYS as VAULT_KNOWN_KEYS, vault
         out["vault"] = {
             "configured": vault is not None and bool(getattr(vault, "_master_key_enc", None)),
             "known_keys": len(VAULT_KNOWN_KEYS),
