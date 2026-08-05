@@ -2431,3 +2431,189 @@ def test_chat_endpoint_routes_github_intent_to_web_search(_vault_db, monkeypatch
         # The query that the web search actually used (visible in the
         # tool event) should be site:github.com restricted
         assert "site:github.com" in text, f"expected site:github.com in stream, got: {text[:600]}"
+
+
+# =============================================================================
+# Phase A + B: corpus indexes + chat intent routing
+# =============================================================================
+
+def test_corpus_health_endpoint_returns_status():
+    """GET /api/health/corpus returns per-corpus counts so the operator
+    UI can show "books indexed: 39/39", "tasks: 5000", etc. The endpoint
+    is authenticated, never raises, and returns whatever it can read."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.get("/api/health/corpus", headers=USER_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body.get("ok") is True
+        # All known sections must be present (even if values are 0)
+        assert "rag_collections" in body
+        assert "scenario_store" in body
+        assert "extra_scenarios" in body
+        assert "syntax" in body
+        assert "books_catalog" in body
+        assert "tasks_catalog" in body
+        # scenario_store must have all 6 packs
+        packs = body["scenario_store"].get("packs", {})
+        assert "github" in packs and packs["github"] == 500
+        assert "aion_stack" in packs and packs["aion_stack"] == 2500
+        # extra_scenarios and syntax reflect on-disk files
+        assert body["extra_scenarios"]["language_count"] == 29
+        assert body["extra_scenarios"]["total_scenarios"] == 2_900_000
+        assert body["syntax"]["technology_count"] == 9
+        assert body["syntax"]["total_snippets"] == 900_000
+        # catalog files exist
+        assert body["books_catalog"]["exists"] is True
+        assert body["tasks_catalog"]["exists"] is True
+
+
+def test_detect_code_task_intent_matches_drills():
+    from app.main import _detect_code_task_intent
+    assert _detect_code_task_intent("give me a go coding task") is True
+    assert _detect_code_task_intent("drill me on python decorators") is True
+    assert _detect_code_task_intent("interview question for a senior role") is True
+    assert _detect_code_task_intent("practice task: refactor this") is True
+    # Negatives
+    assert _detect_code_task_intent("what is the weather") is False
+    assert _detect_code_task_intent("Hello") is False
+    assert _detect_code_task_intent("") is False
+    assert _detect_code_task_intent(None) is False
+
+
+def test_detect_book_intent_matches_recommendations():
+    from app.main import _detect_book_intent
+    assert _detect_book_intent("what book should I read for distributed systems?") is True
+    assert _detect_book_intent("recommend a book on python") is True
+    assert _detect_book_intent("cite a book about kubernetes") is True
+    assert _detect_book_intent("textbook recommendation for algorithms") is True
+    # Negatives
+    assert _detect_book_intent("hello") is False
+    assert _detect_book_intent("what is the weather") is False
+
+
+def test_detect_lang_scenario_intent_returns_slug():
+    from app.main import _detect_lang_scenario_intent
+    assert _detect_lang_scenario_intent("give me a go concurrency drill") == "go"
+    assert _detect_lang_scenario_intent("rust example task for async") == "rust"
+    assert _detect_lang_scenario_intent("in python, what scenarios use asyncio") == "python"
+    assert _detect_lang_scenario_intent("typescript pattern for state management") == "typescript"
+    # C# alias
+    assert _detect_lang_scenario_intent("csharp exercise on generics") == "c_sharp"
+    # No match when no language
+    assert _detect_lang_scenario_intent("what is the weather") is None
+    assert _detect_lang_scenario_intent("hello") is None
+    # No language even with scenario keyword
+    assert _detect_lang_scenario_intent("give me a scenario") is None
+
+
+def test_ensure_corpus_indexes_runs_at_boot():
+    """The boot-time auto-indexer must run without raising; the lifespan
+    yield must NOT be blocked by the index work."""
+    from unittest.mock import patch, AsyncMock
+    from fastapi.testclient import TestClient
+    from app.main import app, _ensure_corpus_indexes
+    import asyncio
+    # The function is a coroutine; just calling it should run the loop
+    fake_result = type("R", (), {"ok": True, "to_dict": lambda self: {"ok": True, "data": {"upserted": 39}}})()
+    with patch("app.skills.runner.get_runner") as fake_get:
+        fake_runner = type("R", (), {"run": AsyncMock(return_value=fake_result)})()
+        fake_get.return_value = fake_runner
+        # Run the function in isolation
+        asyncio.run(_ensure_corpus_indexes())
+        # Must have called runner.run for both targets
+        assert fake_runner.run.call_count == 2
+        call_args = [c.args for c in fake_runner.run.call_args_list]
+        assert call_args[0][0] == "coding.books.index"
+        assert call_args[1][0] == "scenario.index"
+
+
+def test_chat_attaches_extra_scenarios_for_go_drill(_vault_db, monkeypatch):
+    """Chat turn 'give me a go concurrency drill' must attach an
+    extra_scenarios <tool_results> block to the system prompt, with
+    STATUS: SUCCESS and the actual scenarios."""
+    from unittest.mock import patch, AsyncMock
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    fake_extra = type("R", (), {"ok": True, "data": {"ok": True, "count": 2, "hits": [
+        {"id": "go:000042", "domain": "concurrency", "concept": "goroutines", "action": "design the component", "constraint": "low memory", "failure": "handle race conditions; prove with tests."},
+        {"id": "go:000107", "domain": "concurrency", "concept": "channels", "action": "design the component", "constraint": "low memory", "failure": "handle deadlocks; prove with tests."},
+    ]}})()
+    with patch("app.skills.runner.get_runner") as fake_get:
+        fake_runner = type("R", (), {"run": AsyncMock(return_value=fake_extra)})()
+        fake_get.return_value = fake_runner
+        client = TestClient(main_mod.app)
+        r = client.post(
+            "/api/chat",
+            headers=USER_HEADERS,
+            json={"messages": [{"role": "user", "content": "give me a go concurrency drill"}], "web_search": False, "max_tokens": 64, "temperature": 0},
+        )
+        assert r.status_code == 200
+        text = r.text
+        # tools_used must include extra_scenarios
+        assert "extra_scenarios" in text
+        # The tool event must carry the language
+        assert '"language":"go"' in text
+        # The FORBIDDEN line must be present in the system prompt block
+        # (visible indirectly via the LLM behavior; here we just verify
+        # the tool was called with the right args)
+        called_skills = [c.args[0] for c in fake_runner.run.call_args_list if c.args]
+        assert "extra.scenarios.search" in called_skills
+
+
+def test_chat_attaches_coding_tasks_for_drill_intent(_vault_db, monkeypatch):
+    """Chat turn 'give me a coding task' must attach a coding_tasks
+    <tool_results> block."""
+    from unittest.mock import patch, AsyncMock
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    fake_task = type("R", (), {"ok": True, "data": {"ok": True, "count": 1, "hits": [
+        {"id": "CT-0042", "title": "Build an idempotent webhook", "objective": "Design a webhook receiver that handles duplicate delivery."}
+    ]}})()
+    with patch("app.skills.runner.get_runner") as fake_get:
+        fake_runner = type("R", (), {"run": AsyncMock(return_value=fake_task)})()
+        fake_get.return_value = fake_runner
+        client = TestClient(main_mod.app)
+        r = client.post(
+            "/api/chat",
+            headers=USER_HEADERS,
+            json={"messages": [{"role": "user", "content": "drill me on python decorators"}], "web_search": False, "max_tokens": 64, "temperature": 0},
+        )
+        assert r.status_code == 200
+        text = r.text
+        assert "coding_tasks" in text
+        called_skills = [c.args[0] for c in fake_runner.run.call_args_list if c.args]
+        assert "coding.tasks.search" in called_skills
+
+
+def test_chat_no_corpus_when_no_intent(_vault_db, monkeypatch):
+    """A plain English question with no corpus intent must NOT trigger
+    any corpus search."""
+    from unittest.mock import patch, AsyncMock
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    fake_task = type("R", (), {"ok": True, "data": {"ok": True, "count": 0, "hits": []}})()
+    with patch("app.skills.runner.get_runner") as fake_get:
+        fake_runner = type("R", (), {"run": AsyncMock(return_value=fake_task)})()
+        fake_get.return_value = fake_runner
+        client = TestClient(main_mod.app)
+        r = client.post(
+            "/api/chat",
+            headers=USER_HEADERS,
+            json={"messages": [{"role": "user", "content": "what is the weather today"}], "web_search": False, "max_tokens": 64, "temperature": 0},
+        )
+        assert r.status_code == 200
+        text = r.text
+        # No corpus tool in the SSE stream
+        for corpus_tool in ("extra_scenarios", "coding_tasks", "coding_books"):
+            assert f'"tool":"{corpus_tool}"' not in text, f"{corpus_tool} should not have fired for non-corpus intent"

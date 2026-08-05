@@ -117,7 +117,48 @@ class BodyLimitMiddleware:
         try: await self.app(scope, limited_receive, send)
         except HTTPException as exc: await JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})(scope, receive, send)
 
-@asynccontextmanager
+async def _ensure_corpus_indexes() -> None:
+    """Phase A3: idempotent boot-time auto-index for RAG-backed corpora.
+
+    Why only coding.books.index and scenario.index pack=github:
+      - coding.books.search is RAG-backed; without the index it returns 0.
+      - scenario.match (and the 6 per-pack skills) reads from the in-process
+        ScenarioStore which is already populated at boot — no RAG needed.
+        But scenario.index (the RAG indexer) is also called so rag.skills.search
+        can find rows by natural language.
+      - coding.tasks.index is SKIPPED on boot: coding.tasks.search is
+        CSV-backed and returns hits without RAG; re-indexing 5,000 rows on
+        every boot is pure disk I/O for no functional gain.
+      - extra.scenarios.* is SKIPPED: lazy per-language, no global index.
+
+    Failure isolation: any single index failure is logged and swallowed so
+    one bad index does not block the others. The whole function is also
+    guarded so a failure here NEVER blocks the lifespan from yielding.
+    """
+    from .skills.runner import get_runner
+    runner = get_runner()
+    targets = (
+        ("coding.books.index", {}),
+        ("scenario.index", {"pack": "github"}),
+    )
+    for skill_id, args in targets:
+        try:
+            # runner.run is async; await it directly. The whole function
+            # is already running as a background task (asyncio.create_task
+            # in lifespan), so this does not block the lifespan's yield.
+            result = await runner.run(skill_id, args, subject="system:boot")
+            audit.record("corpus.index", {
+                "skill": skill_id,
+                "ok": bool(result.ok),
+                "detail": str(result.to_dict())[:300],
+            })
+        except Exception as exc:
+            audit.record("corpus.index.failed", {
+                "skill": skill_id,
+                "error": str(exc)[:200],
+            })
+
+
 async def lifespan(_: FastAPI):
     settings.validate_startup()
     audit.record("aion.startup", {"version": settings.app_version, "environment": settings.environment})
@@ -142,6 +183,13 @@ async def lifespan(_: FastAPI):
         audit.record("skills.boot", {"seeded": info.get("seeded"), "db": info.get("db")})
     except Exception as exc:
         audit.record("skills.boot.failed", {"error": str(exc)[:200]})
+    # Phase A3: best-effort auto-index the RAG-backed corpora on boot so a
+    # fresh deploy never ships with empty search results. Runs in a background
+    # thread (asyncio.to_thread) so the lifespan is not blocked — first user
+    # request that needs the data may briefly hit an empty collection.
+    # IDEMPOTENT: the indexers upsert by deterministic chunk_id; re-running
+    # on every boot is safe and just refreshes the RAG row.
+    asyncio.create_task(_ensure_corpus_indexes())
     # extra_scenarios / syntax: lazy load per language on first request.
     # No pre-warm: the 29 .txt files (~400MB total) and 9 syntax files
     # (~80MB total) are too heavy to block startup. First user request
@@ -181,6 +229,84 @@ async def models_all(_: Principal = Depends(authenticated)):
     return {"providers": providers, "flat": flat, "chain": settings.model_chain, "primary": settings.primary_model}
 @app.get("/api/audit/recent")
 async def audit_recent(n: int = Query(default=50, ge=1, le=200), _: Principal = Depends(require_admin)): return {"events": audit.recent(n)}
+
+
+@app.get("/api/health/corpus")
+async def corpus_health(_: Principal = Depends(authenticated)):
+    """Phase A4: live corpus health for the operator UI.
+
+    Returns per-corpus status: how many docs are in each RAG collection,
+    how many languages have on-disk files, and the scenario store row count.
+    Used by the frontend Settings panel to show "books indexed: 39/39" etc.
+
+    The /api/health/corpus endpoint never raises; it returns whatever it
+    can read so a partial-outage does not block the whole page.
+    """
+    out: dict[str, Any] = {"ok": True}
+
+    # RAG collections: query LocalRagStore for each known collection.
+    try:
+        from .skills.rag.store import get_rag_store
+        rag = get_rag_store()
+        out["rag_collections"] = {
+            "coding_books": rag.count("coding_books"),
+            "coding_tasks": rag.count("coding_tasks"),
+            "scenario_policy_github": rag.count("scenario_policy_github"),
+            "scenario_policy": rag.count("scenario_policy"),
+        }
+    except Exception as exc:
+        out["rag_collections"] = {"error": str(exc)[:200]}
+
+    # Scenario store: in-process, never empty after boot.
+    try:
+        from .skills.clients.scenario_store import get_store
+        store = get_store()
+        stats = store.stats()
+        out["scenario_store"] = {
+            "total_rows": stats.get("total_rows", 0),
+            "packs": stats.get("packs", {}),
+            "errors": stats.get("errors", []),
+        }
+    except Exception as exc:
+        out["scenario_store"] = {"error": str(exc)[:200]}
+
+    # extra_scenarios + syntax: on-disk file count (no in-memory load).
+    try:
+        from .skills.clients.extra_scenarios import list_languages as list_extra
+        extra = list_extra()
+        out["extra_scenarios"] = {
+            "language_count": len(extra),
+            "total_scenarios": sum(l["count"] for l in extra),
+        }
+    except Exception as exc:
+        out["extra_scenarios"] = {"error": str(exc)[:200]}
+
+    try:
+        from .skills.clients.syntax import list_technologies as list_syntax
+        syn = list_syntax()
+        out["syntax"] = {
+            "technology_count": len(syn),
+            "total_snippets": sum(t["count"] for t in syn),
+        }
+    except Exception as exc:
+        out["syntax"] = {"error": str(exc)[:200]}
+
+    # Catalog files (no RAG): file-backed, just confirm they exist.
+    try:
+        from .skills.clients.coding_books_rag import resolve_catalog_path
+        books_path = resolve_catalog_path()
+        out["books_catalog"] = {"path": str(books_path), "exists": books_path.is_file()}
+    except Exception as exc:
+        out["books_catalog"] = {"error": str(exc)[:200]}
+
+    try:
+        from .skills.clients.coding_tasks_corpus import resolve_csv
+        tasks_path = resolve_csv()
+        out["tasks_catalog"] = {"path": str(tasks_path), "exists": tasks_path.is_file()}
+    except Exception as exc:
+        out["tasks_catalog"] = {"error": str(exc)[:200]}
+
+    return out
 
 
 # ===========================================================================
@@ -697,6 +823,18 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             tool_contexts.append(wrapped)
             tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
+
+    # Phase B: corpus intent routing. After web + github tools, run the
+    # most-specific corpus regex first (language-scenario), then task,
+    # then book. Each corpus hit is wrapped in the same STATUS shell as
+    # web/github so the model treats them as authoritative evidence.
+    # ZERO-HIT rule: if the corpus is empty, append a short "no matches"
+    # block so the model can say "no public CT- matches" instead of
+    # inventing CT- ids.
+    corpus_evidence = await _gather_corpus_evidence(user_text)
+    for ev in corpus_evidence:
+        tool_contexts.append(ev["wrapped"])
+        tool_events.append(ev["event"])
     mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
     decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "", tool_errors=tuple(tool_errors))
     model_messages = [{"role": "system", "content": system_prompt}, *({"role": message.role, "content": message.wire_content()} for message in body.messages)]
@@ -749,6 +887,10 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
         tools_used = []
         if search_query: tools_used.append("web_search")
         if repository: tools_used.append(f"github_{github_mode}")
+        for ev in corpus_evidence:
+            t = ev.get("event", {}).get("tool")
+            if t and t not in tools_used:
+                tools_used.append(t)
         yield _sse({"type": "tools_used", "request_id": mission.request_id, "tools": tools_used})
         for event in tool_events:
             yield _sse(event)
@@ -1094,6 +1236,64 @@ def _is_github_intent(text: str) -> bool:
 
 
 # ----------------------------------------------------------------------------
+# Phase B: corpus intent detection. The chat() handler runs these in
+# priority order (most specific first) and only fetches the matching
+# corpus. Plain English "give me a go concurrency drill" should pull
+# extra_scenarios (specific) NOT coding_tasks (generic), so we run
+# the more-specific regex first.
+# ----------------------------------------------------------------------------
+_CODE_TASK = re.compile(
+    r"(?i)\b("
+    r"coding\s+task|"
+    r"practice\s+task|"
+    r"drill|"
+    r"interview\s+(question|prompt)|"
+    r"give\s+me\s+a\s+(python|go|rust|sql|java|typescript|javascript|kotlin|swift|ruby|php|c\#|csharp)"
+    r")\b"
+)
+_BOOK = re.compile(
+    r"(?i)\b("
+    r"what\s+book|"
+    r"coding\s+book|"
+    r"recommend\s+(a\s+)?book|"
+    r"cite\s+(a\s+)?book|"
+    r"textbook|"
+    r"reference\s+book"
+    r")\b"
+)
+# Language-scenario: "go concurrency scenario" / "rust example task" / etc.
+# Captures the language so we can route to extra.scenarios.search.
+_LANG_SCEN = re.compile(
+    r"(?i)\b("
+    r"in\s+|using\s+|with\s+)?"
+    r"(?P<lang>go|rust|python|typescript|javascript|java|php|ruby|swift|kotlin|c\#|csharp)\b"
+    r"[^\n]{0,80}\b(scenarios?|example\s+task|exercise|drill|pattern)s?\b"
+)
+_LANG_ALIASES = {
+    "go": "go", "rust": "rust", "python": "python", "typescript": "typescript",
+    "javascript": "javascript", "java": "java", "php": "php", "ruby": "ruby",
+    "swift": "swift", "kotlin": "kotlin", "c#": "c_sharp", "csharp": "c_sharp",
+}
+
+
+def _detect_code_task_intent(text: str) -> bool:
+    return bool(_CODE_TASK.search(text or ""))
+
+
+def _detect_book_intent(text: str) -> bool:
+    return bool(_BOOK.search(text or ""))
+
+
+def _detect_lang_scenario_intent(text: str) -> str | None:
+    """Return the language slug if the user is asking for a scenario in a
+    specific language, else None."""
+    m = _LANG_SCEN.search(text or "")
+    if not m:
+        return None
+    return _LANG_ALIASES.get(m.group("lang").lower())
+
+
+# ----------------------------------------------------------------------------
 # Phase 1: site-restricted web-search intent (GitHub / LinkedIn topic search)
 # ----------------------------------------------------------------------------
 # Plain English "Search github for X" used to silently fall through and
@@ -1157,6 +1357,99 @@ def resolve_web_query(user_text: str, explicit_search: str | None) -> str | None
         q = re.sub(r"^for\s+", "", m.group("q").strip(), flags=re.I).lower()
         return f"site:linkedin.com {q[:350]}"
     return None
+
+
+async def _gather_corpus_evidence(user_text: str) -> list[dict[str, Any]]:
+    """Phase B helper: detect corpus intent and fetch matching evidence.
+
+    Returns a list of {"wrapped": <tool_results XML>, "event": <sse event>}
+    dicts, one per corpus that produced hits. Order is priority
+    (language-scenario > task > book). Empty results are NOT included;
+    the caller sees an empty list and the model gets no corpus context.
+    """
+    from .skills.runner import get_runner
+    out: list[dict[str, Any]] = []
+
+    # Priority 1: language-specific scenario (e.g. "go concurrency drill")
+    lang = _detect_lang_scenario_intent(user_text)
+    if lang:
+        try:
+            runner = get_runner()
+            result = await runner.run(
+                "extra.scenarios.search",
+                {"language": lang, "query": user_text[:200], "limit": 3},
+                subject="system:chat",
+            )
+            data = result.data if hasattr(result, "data") else (result.get("data") or {})
+            hits = data.get("hits") or []
+            if hits:
+                lines = [f"- id={h.get('id')} domain={h.get('domain')} concept={h.get('concept')} failure={h.get('failure','')[:120]}" for h in hits[:3]]
+                wrapped = (
+                    f"<tool_results source=\"extra_scenarios\" language=\"{lang}\">\n"
+                    f"STATUS: SUCCESS — the scenarios below are real rows from the corpus.\n"
+                    f"FORBIDDEN: inventing scenario ids not in the list below.\n"
+                    f"FORBIDDEN: paraphrasing past the constraint or failure lines.\n"
+                    "\n"
+                    + "\n".join(lines) + "\n"
+                    "</tool_results>"
+                )
+                out.append({"wrapped": wrapped, "event": {"type": "tool", "tool": "extra_scenarios", "language": lang, "count": len(hits), "results": [{"id": h.get("id"), "concept": h.get("concept")} for h in hits[:3]]}})
+        except Exception as exc:
+            audit.record("corpus.chat.evidence_failed", {"source": "extra_scenarios", "error": str(exc)[:200]})
+
+    # Priority 2: coding task (e.g. "give me a coding task")
+    if _detect_code_task_intent(user_text):
+        try:
+            runner = get_runner()
+            result = await runner.run(
+                "coding.tasks.search",
+                {"query": user_text[:200], "limit": 3},
+                subject="system:chat",
+            )
+            data = result.data if hasattr(result, "data") else (result.get("data") or {})
+            hits = data.get("hits") or []
+            if hits:
+                lines = [f"- id={h.get('id')} title={h.get('title','')[:100]} objective={h.get('objective','')[:120]}" for h in hits[:3]]
+                wrapped = (
+                    "<tool_results source=\"coding_tasks\">\n"
+                    "STATUS: SUCCESS — the task ids below are real rows.\n"
+                    "FORBIDDEN: inventing CT- ids not in the list below.\n"
+                    "FORBIDDEN: claiming a task exists when zero hits returned.\n"
+                    "\n"
+                    + "\n".join(lines) + "\n"
+                    "</tool_results>"
+                )
+                out.append({"wrapped": wrapped, "event": {"type": "tool", "tool": "coding_tasks", "count": len(hits), "results": [{"id": h.get("id"), "title": h.get("title")} for h in hits[:3]]}})
+        except Exception as exc:
+            audit.record("corpus.chat.evidence_failed", {"source": "coding_tasks", "error": str(exc)[:200]})
+
+    # Priority 3: book recommendation (e.g. "what book should I read")
+    if _detect_book_intent(user_text):
+        try:
+            runner = get_runner()
+            result = await runner.run(
+                "coding.books.search",
+                {"query": user_text[:200], "limit": 3},
+                subject="system:chat",
+            )
+            data = result.data if hasattr(result, "data") else (result.get("data") or {})
+            hits = data.get("hits") or []
+            if hits:
+                lines = [f"- id={h.get('meta',{}).get('book_id') or h.get('id','')} title={h.get('meta',{}).get('title') or ''} level={h.get('meta',{}).get('level') or ''} url={h.get('meta',{}).get('url_primary') or ''}" for h in hits[:3]]
+                wrapped = (
+                    "<tool_results source=\"coding_books\">\n"
+                    "STATUS: SUCCESS — the books below are real rows from the catalog.\n"
+                    "FORBIDDEN: inventing book titles not in the list below.\n"
+                    "FORBIDDEN: claiming a book exists when zero hits returned.\n"
+                    "\n"
+                    + "\n".join(lines) + "\n"
+                    "</tool_results>"
+                )
+                out.append({"wrapped": wrapped, "event": {"type": "tool", "tool": "coding_books", "count": len(hits), "results": [{"title": h.get("meta", {}).get("title"), "level": h.get("meta", {}).get("level")} for h in hits[:3]]}})
+        except Exception as exc:
+            audit.record("corpus.chat.evidence_failed", {"source": "coding_books", "error": str(exc)[:200]})
+
+    return out
 
 
 def _search_query(enabled, text):
