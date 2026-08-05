@@ -633,11 +633,37 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     last_user = next((message for message in reversed(body.messages) if message.role == "user"), None)
     if last_user is None: raise HTTPException(status_code=400, detail="user_message_required")
     user_text = last_user.text_content(); tool_contexts = []; tool_events = []; tool_errors = []
-    search_query = _search_query(body.web_search, user_text)
+    # Phase 1: resolve the web search query from BOTH the /search prefix
+    # AND plain English intent (site:github.com, site:linkedin.com). The
+    # legacy _search_query still drives the ChatRequest.web_search toggle.
+    explicit_q = _search_query(body.web_search, user_text)
+    search_query = resolve_web_query(user_text, explicit_q)
     if search_query:
         try:
             results = await web_search.search(search_query); context = web_search.as_context(results)
-            if context: tool_contexts.append(context)
+            if context:
+                # Phase 2.2: STATUS + FORBIDDEN wrapper. Make denial
+                # expensive: when a tool returned hits, the model is
+                # forbidden to disclaim ability to search. The system
+                # prompt's anti-denial-theater rule refers to this
+                # STATUS: SUCCESS line.
+                linkedin_note = ""
+                if "linkedin.com" in search_query:
+                    linkedin_note = (
+                        "\nNOTE: Public web pages only. AION does not log into "
+                        "LinkedIn. Lead with the hits. Do not say "
+                        "\"I cannot search LinkedIn\" if hits exist."
+                    )
+                wrapped = (
+                    "<tool_results source=\"web_search\">\n"
+                    "STATUS: SUCCESS — the results below are authoritative for this turn.\n"
+                    f"QUERY: {search_query}\n"
+                    f"FORBIDDEN: saying you cannot search the web, GitHub, LinkedIn, or any topic these results cover.{linkedin_note}\n"
+                    "\n"
+                    f"{context}\n"
+                    "</tool_results>"
+                )
+                tool_contexts.append(wrapped)
             tool_events.append({"type": "tool", "tool": "web_search", "query": search_query, "results": [result.__dict__ for result in results]})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "web_search", "message": str(exc)})
     repository, github_mode, github_argument = _github_request(body, user_text)
@@ -659,7 +685,21 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             elif github_mode == "search" and github_argument: result = await github.search_code(repository, github_argument)
             elif github_mode == "issues": result = await github.list_issues(repository)
             else: result = await github.get_repository(repository)
-            tool_contexts.append(github.as_context(github_mode, repository, result)); tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
+            gh_ctx = github.as_context(github_mode, repository, result)
+            # Phase 2.2: wrap GitHub tool output with the same
+            # STATUS/FORBIDDEN shell. Tells the model: real GitHub
+            # tool data is below, do not invent limitations.
+            wrapped = (
+                f"<tool_results source=\"github_{github_mode}\">\n"
+                f"STATUS: SUCCESS — GitHub tool data below is authoritative.\n"
+                f"REPOSITORY: {repository}\n"
+                f"FORBIDDEN: disclaiming ability to read this repo or file. Cite the actual data.\n"
+                "\n"
+                f"{gh_ctx}\n"
+                "</tool_results>"
+            )
+            tool_contexts.append(wrapped)
+            tool_events.append({"type": "tool", "tool": f"github_{github_mode}", "repository": repository, "result": result})
         except (ToolConfigurationError, ToolRequestError) as exc: tool_errors.append(str(exc)); tool_events.append({"type": "tool_error", "tool": "github", "message": str(exc)})
     mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
     decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "", tool_errors=tuple(tool_errors))
@@ -673,7 +713,19 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     # DEFER. That decision is authoritative — Brain is the LLM router,
     # not the tool-state oracle. Don't ask Brain to re-decide.
     tool_state_forced_defer = bool(tool_errors) and bool(search_query or repository)
-    use_brain = brain_client.is_configured() and not settings.brain_decision_only and not tool_state_forced_defer  # brain_decision_only means: use brain for /api/decision only, not /api/chat
+    # Phase 2.1: when a tool ran SUCCESSFULLY (returned hits), keep the
+    # answer on the local backend path so the model sees the system
+    # prompt as a real system message (with the anti-denial-theater
+    # rule + tool_context wrapper). Brain folds the system prompt into
+    # the first user message, which mini models tend to drop — that is
+    # the operator's "I cannot search GitHub" failure mode.
+    tools_succeeded = bool(tool_contexts) and not tool_errors
+    use_brain = (
+        brain_client.is_configured()
+        and not settings.brain_decision_only
+        and not tool_state_forced_defer
+        and not tools_succeeded
+    )  # brain_decision_only means: use brain for /api/decision only, not /api/chat
     # Probe Brain once to capture latency for the SSE brain event + the
     # X-AION-Brain-Latency-Ms response header. Done synchronously here so
     # the SSE brain event carries the right value; the chat stream itself
@@ -1043,6 +1095,71 @@ _GITHUB_INTENT_RE = re.compile(
 
 def _is_github_intent(text: str) -> bool:
     return bool(_GITHUB_INTENT_RE.search(text or ""))
+
+
+# ----------------------------------------------------------------------------
+# Phase 1: site-restricted web-search intent (GitHub / LinkedIn topic search)
+# ----------------------------------------------------------------------------
+# Plain English "Search github for X" used to silently fall through and
+# return "I cannot search GitHub." We now resolve it to a web search
+# constrained to site:github.com (or site:linkedin.com), so the model
+# has real hits to cite and the anti-denial-theater rule is meaningful.
+
+_GH_SEARCH_INTENT = re.compile(
+    r"\b("
+    r"search\s+github(\.com)?\s+for\b|"
+    r"github(\.com)?\s+search\b|"
+    r"find\s+(a\s+)?(repos?|repositories|repository|projects?)\s+(on\s+)?github\b|"
+    r"search\s+(repos?|repositories)\s+for\b"
+    r")\s*(?P<q>.+)$",
+    re.I,
+)
+_LINKEDIN_INTENT = re.compile(
+    r"\b(search\s+)?linkedin(\.com)?\s+for\b\s*(?P<q>.+)$",
+    re.I,
+)
+
+
+def resolve_web_query(user_text: str, explicit_search: str | None) -> str | None:
+    """Return the web-search query string for this turn, or None if no
+    web search should fire.
+
+    Rules (in order):
+      1. If the user typed /search <q>, the q is the search; rewrite
+         "github.com" / "linkedin.com" prefixes into a site: filter.
+      2. If the user turn is a GitHub/LinkedIn intent (plain English or
+         the /search variant), route to a site:-restricted web search
+         instead of leaving the LLM to invent "I cannot search X".
+      3. Otherwise return the explicit query unchanged (capped at 400).
+
+    Returns None when no web search is appropriate (e.g. user typed
+    "Hello" with no search toggle).
+    """
+    if explicit_search:
+        q = explicit_search.strip()
+        if not q:
+            return None
+        # /search github.com for X  ->  site:github.com X
+        if re.search(r"(?i)^github\.com\b", q) or re.search(r"(?i)\bsite:\s*github", q):
+            rest = re.sub(r"(?i)^(site:)?github\.com\s*(for\s*)?", "", q).strip()
+            return (f"site:github.com {rest}" if rest else "site:github.com")[:400]
+        if re.search(r"(?i)^linkedin(\.com)?\b", q) or re.search(r"(?i)\bsite:\s*linkedin", q):
+            rest = re.sub(r"(?i)^(site:)?linkedin(\.com)?\s*(for\s*)?", "", q).strip()
+            return (f"site:linkedin.com {rest}" if rest else "site:linkedin.com")[:400]
+        return q[:400]
+
+    text = (user_text or "").strip()
+    if not text:
+        return None
+    m = _GH_SEARCH_INTENT.search(text)
+    if m:
+        q = re.sub(r"^for\s+", "", m.group("q").strip(), flags=re.I).lower()
+        return f"site:github.com {q[:350]}"
+    m = _LINKEDIN_INTENT.search(text)
+    if m:
+        q = re.sub(r"^for\s+", "", m.group("q").strip(), flags=re.I).lower()
+        return f"site:linkedin.com {q[:350]}"
+    return None
 
 
 def _search_query(enabled, text):

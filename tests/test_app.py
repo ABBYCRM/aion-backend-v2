@@ -2220,3 +2220,213 @@ def test_kernel_system_prompt_clause_always_present():
     assert "tool RAN SUCCESSFULLY" in prompt_with_ctx
     assert "I cannot search" in prompt_no_ctx
     assert "I cannot search" in prompt_with_ctx
+
+
+# =============================================================================
+# Phase 7 hardening: resolve_web_query + use_brain gating + tool_context wrapper
+# (Operator second-pass 2026-08-05 — locked behavior)
+# =============================================================================
+
+def test_resolve_web_query_github_intent_routes_to_site_filter():
+    """Plain English GitHub intent must resolve to a site:github.com
+    web search. The model will then have real hits to cite, and the
+    anti-denial-theater rule becomes meaningful."""
+    from app.main import resolve_web_query
+    assert resolve_web_query("Search github for agentic software", None) == "site:github.com agentic software"
+    assert resolve_web_query("search github.com for kafka", None) == "site:github.com kafka"
+    assert resolve_web_query("github search react hooks", None) == "site:github.com react hooks"
+    assert resolve_web_query("find repos on github for python linter", None) == "site:github.com python linter"
+    assert resolve_web_query("find a repository on github for auth flow", None) == "site:github.com auth flow"
+    # Mixed case
+    assert resolve_web_query("SEARCH GITHUB.COM FOR LANGCHAIN", None) == "site:github.com langchain"
+
+
+def test_resolve_web_query_linkedin_intent_routes_to_site_filter():
+    """LinkedIn searches go to a site:linkedin.com web search. The
+    tool_context wrapper will then add the LinkedIn honesty note."""
+    from app.main import resolve_web_query
+    assert resolve_web_query("search Linkedin.com for mass tort lead providers from india", None) == "site:linkedin.com mass tort lead providers from india"
+    assert resolve_web_query("linkedin for python developers", None) == "site:linkedin.com python developers"
+
+
+def test_resolve_web_query_returns_none_for_unrelated():
+    """Non-search turns must NOT auto-fire a web search."""
+    from app.main import resolve_web_query
+    assert resolve_web_query("what is the weather today", None) is None
+    assert resolve_web_query("hello", None) is None
+    assert resolve_web_query("", None) is None
+    assert resolve_web_query(None, None) is None
+
+
+def test_resolve_web_query_explicit_search_overrides_intent():
+    """When the user typed /search <q>, that is the search. The /search
+    variant also rewrites github.com / linkedin.com prefixes into
+    site: filters."""
+    from app.main import resolve_web_query
+    # Plain explicit search
+    assert resolve_web_query("hello", "python linter tutorial") == "python linter tutorial"
+    # /search github.com for X -> site:github.com X
+    assert resolve_web_query("hello", "github.com for kafka") == "site:github.com kafka"
+    # /search linkedin.com for X -> site:linkedin.com X
+    assert resolve_web_query("hello", "linkedin.com for plumbers") == "site:linkedin.com plumbers"
+    # Already has site: prefix
+    assert resolve_web_query("hello", "site:github.com kafka") == "site:github.com kafka"
+
+
+def test_resolve_web_query_caps_at_400_chars():
+    """Hard cap prevents the LLM from receiving 4k-char queries."""
+    from app.main import resolve_web_query
+    long_q = "site:github.com " + ("foo " * 200)
+    result = resolve_web_query("hello", long_q)
+    assert len(result) <= 400
+    assert result.startswith("site:github.com")
+
+
+def test_resolve_web_query_strips_leading_for_in_query():
+    """After 'find repos on github for X', the query 'for X' is left
+    over — strip the leading 'for' so the search is just 'X'."""
+    from app.main import resolve_web_query
+    # The 'for X' is the search terms; strip the leading 'for '
+    assert resolve_web_query("find repos on github for python linter", None) == "site:github.com python linter"
+    # The 'for ' is case-insensitive
+    assert resolve_web_query("find repos on github FOR python linter", None) == "site:github.com python linter"
+    # Phrases without the 'github' keyword do NOT auto-route to github search
+    assert resolve_web_query("find a repository for auth flow", None) is None
+    assert resolve_web_query("search for python tutorials", None) is None
+
+
+def test_use_brain_false_when_tools_succeeded(_vault_db, monkeypatch):
+    """When a tool ran successfully (returned context), the chat
+    handler must keep the answer on the local backend path so the
+    model sees the system prompt as a real system message. Brain
+    folds the system prompt into the first user message, which
+    mini models tend to drop — the operator's 'I cannot search'
+    failure mode."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "true")
+    monkeypatch.setenv("AION_BRAIN_URL", "http://localhost:10001")
+    monkeypatch.setenv("AION_BRAIN_KEY", "test-brain-key")
+    monkeypatch.setenv("AION_BRAIN_DECISION_ONLY", "false")
+    monkeypatch.setenv("AION_BRAIN_REQUIRED", "false")
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    # Plain English github intent — site:github.com search would fire
+    # in real life, but with no Brave/Google configured, web_search
+    # returns 0 hits and tool_contexts stays empty. So we test the
+    # OTHER direction: stub the web_search so it returns hits.
+    from unittest.mock import patch, AsyncMock
+    fake_result = type("R", (), {"__dict__": {"title": "x", "url": "https://github.com/foo/bar", "snippet": "x", "published_at": None}})()
+    with patch.object(main_mod, "web_search") as fake_ws:
+        fake_ws.search = AsyncMock(return_value=[fake_result])
+        fake_ws.as_context = lambda r: "<tool_results>1 result</tool_results>"
+        # Bypass the github-intent path by using a query that does NOT
+        # match github intent, so web_search fires directly
+        r = client.post(
+            "/api/chat",
+            headers=USER_HEADERS,
+            json={"messages": [{"role": "user", "content": "what is python"}], "web_search": True, "max_tokens": 64, "temperature": 0},
+        )
+        assert r.status_code == 200
+        # The local path's LLM would have errored (no provider), but the
+        # key thing is the SSE stream must include "provider":"aion"
+        # (local) NOT a Brain attempt. Look for either the local
+        # AllProvidersFailed error or a successful local open.
+        text = r.text
+        # If we got an "all_providers_failed" or "aion" provider, the
+        # local path ran. If we got Brain SSE events, the fix didn't work.
+        # Specifically: the Brain stream starts with a "lattice" event;
+        # the local path does NOT.
+        assert "lattice" not in text, f"tools_succeeded but use_brain stayed True (got Brain events): {text[:600]}"
+
+
+def test_web_search_tool_context_includes_status_forbidden():
+    """The web_search tool_context must include a STATUS: SUCCESS
+    line and a FORBIDDEN: ... line, so the anti-denial-theater rule
+    in the system prompt is anchored to a real instruction. The
+    wrapper is what gets passed to build_system_prompt via
+    tool_context=...; test by building the prompt with the wrapped
+    context."""
+    from app.kernel import build_system_prompt, resolve_decision, MissionContext
+    wrapped = (
+        '<tool_results source="web_search">\n'
+        'STATUS: SUCCESS — the results below are authoritative for this turn.\n'
+        'QUERY: site:github.com agentic software\n'
+        'FORBIDDEN: saying you cannot search the web, GitHub, LinkedIn, or any topic these results cover.\n'
+        '\n'
+        '[1] example.com\n'
+        '</tool_results>'
+    )
+    ctx = MissionContext(user_input="Search github for agentic software")
+    decision = resolve_decision(ctx)
+    prompt = build_system_prompt(decision, tool_context=wrapped)
+    assert "STATUS: SUCCESS" in prompt
+    assert "FORBIDDEN: saying you cannot search" in prompt
+    assert "site:github.com agentic software" in prompt
+
+
+def test_linkedin_honesty_note_in_tool_context():
+    """When the resolved query is a site:linkedin.com search, the
+    tool_context wrapper must add the LinkedIn honesty note. Test
+    by building the prompt with the wrapped context containing the
+    note."""
+    from app.kernel import build_system_prompt, resolve_decision, MissionContext
+    linkedin_note = (
+        '\nNOTE: Public web pages only. AION does not log into '
+        'LinkedIn. Lead with the hits. Do not say '
+        '"I cannot search LinkedIn" if hits exist.'
+    )
+    wrapped = (
+        '<tool_results source="web_search">\n'
+        'STATUS: SUCCESS — the results below are authoritative for this turn.\n'
+        'QUERY: site:linkedin.com python developers\n'
+        f'FORBIDDEN: saying you cannot search the web, GitHub, LinkedIn, or any topic these results cover.{linkedin_note}\n'
+        '\n'
+        '[1] linkedin hit\n'
+        '</tool_results>'
+    )
+    ctx = MissionContext(user_input="search linkedin for python developers")
+    decision = resolve_decision(ctx)
+    prompt = build_system_prompt(decision, tool_context=wrapped)
+    assert "Public web pages only" in prompt
+    assert "does not log into LinkedIn" in prompt
+    assert "site:linkedin.com python developers" in prompt
+
+
+def test_chat_endpoint_routes_github_intent_to_web_search(_vault_db, monkeypatch):
+    """Locked regression: 'Search github for X' must reach the chat
+    endpoint cleanly (not 500) and stream a tools_used event. This
+    was the operator's screenshot failure case."""
+    from unittest.mock import patch, AsyncMock
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    # Mock web_search so it doesn't actually hit the network
+    fake_result = type("R", (), {"__dict__": {"title": "x", "url": "https://github.com/foo/bar", "snippet": "x", "published_at": None}})()
+    with patch.object(main_mod, "web_search") as fake_ws:
+        fake_ws.search = AsyncMock(return_value=[fake_result])
+        fake_ws.as_context = lambda r: "[1] github.com/foo/bar"
+        client = TestClient(main_mod.app)
+        r = client.post(
+            "/api/chat",
+            headers=USER_HEADERS,
+            json={"messages": [{"role": "user", "content": "Search github for agentic software"}], "web_search": True, "max_tokens": 64, "temperature": 0},
+        )
+        assert r.status_code == 200, f"chat crashed: {r.text[:300]}"
+        # tools_used must include web_search (site:github.com routed here)
+        text = r.text
+        assert "tools_used" in text
+        # The first event after the decision should be tools_used
+        first_tools = None
+        for line in text.splitlines():
+            if "tools_used" in line:
+                first_tools = line
+                break
+        assert first_tools is not None
+        assert "web_search" in first_tools
+        # The query that the web search actually used (visible in the
+        # tool event) should be site:github.com restricted
+        assert "site:github.com" in text, f"expected site:github.com in stream, got: {text[:600]}"
