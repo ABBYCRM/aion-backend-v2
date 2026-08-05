@@ -11,3 +11,5 @@ data/
 *.sqlite3-wal
 audit.jsonl
 .DS_Store
+
+!data/books/

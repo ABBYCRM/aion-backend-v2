@@ -147,6 +147,25 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "properties": {}},
             executor="builtin:github.scenario.index", tags=["github", "policy", "rag", "legacy"],
             error_codes=["scenarios_load_failed", "scenarios_empty"]),
+        # ---- 3 coding-books skills (operator RAG pack, 2026-08-05) ----
+        SkillSpec(id="coding.books.index", name="Coding books RAG indexer",
+            description="Parse data/books/coding_books_catalog.json (39 open coding books) and upsert one RAG document per book into the coding_books collection. No PDF download required; indexes metadata + notes. Idempotent (deterministic chunk_id per book).",
+            side_effect="write",
+            input_schema={"type": "object", "properties": {"catalog_path": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:coding.books.index", tags=["rag", "books", "index"],
+            error_codes=["catalog_not_found", "index_failed", "rag_store_unavailable"]),
+        SkillSpec(id="coding.books.search", name="Coding books RAG search",
+            description="Keyword search the coding_books RAG collection. Returns ranked books with id/title/license/url_primary.",
+            side_effect="read",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
+            executor="builtin:coding.books.search", tags=["rag", "books", "search"],
+            error_codes=["invalid_args", "rag_search_unavailable"]),
+        SkillSpec(id="coding.books.catalog", name="Coding books catalog filter",
+            description="List/filter the coding_books catalog without embeddings. Filters: topic, level, language. Returns id/title/level/topics/languages/url_primary/url_pdf/license.",
+            side_effect="read",
+            input_schema={"type": "object", "properties": {"topic": {"type": "string"}, "level": {"type": "string"}, "language": {"type": "string"}, "catalog_path": {"type": "string"}}, "additionalProperties": True},
+            executor="builtin:coding.books.catalog", tags=["books", "catalog"],
+            error_codes=["catalog_not_found"]),
     ]
 
 
@@ -171,6 +190,7 @@ async def _catalog(args, ctx):
 def wire_executors() -> None:
     from .clients import github_scenarios as ghs
     from .clients import scenarios as scn
+    from .clients import coding_books_rag as cbr
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
@@ -193,6 +213,9 @@ def wire_executors() -> None:
         "builtin:render.scenario.match": scn.render_scenario_match,
         "builtin:scenario.match": scn.scenario_match_all,
         "builtin:scenario.index": scn.scenario_index,
+        "builtin:coding.books.index": cbr.coding_books_index,
+        "builtin:coding.books.search": cbr.coding_books_search,
+        "builtin:coding.books.catalog": cbr.coding_books_catalog,
     })
 
 

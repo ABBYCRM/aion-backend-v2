@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_12_contracts():
+def test_skills_bootstrap_seeds_23_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 20
+    assert info.get("seeded") == 23
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 20
+    assert result.data["count"] >= 23
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 20
+    assert body.get("count") >= 23
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -629,7 +629,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 20
+    assert body["data"]["count"] >= 23
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 20
+    assert body.get("seeded") == 23
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,17 +688,17 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 20
+    assert r2.json().get("seeded") == 23
 
 
 
 
-def test_scenario_bootstrap_seeds_20_contracts():
+def test_scenario_bootstrap_seeds_23_contracts():
     """After installing the GitHub scenarios CSV, the catalog must
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 20
+    assert info.get("seeded") == 23
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
