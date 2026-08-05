@@ -683,35 +683,132 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             yield _sse(event)
 
         # Hard stop on tool failure: never let the LLM invent analysis
-        # without evidence. Stream a factual refusal and return — Brain,
-        # OpenAI, NVIDIA, the whole chain is skipped for this turn.
+        # without evidence. The v2 scenario matcher looks up a real
+        # policy row; if one matches we attach the if_action / else_action
+        # as `policy_evidence` so the next turn can act on real data, and
+        # if no row matches we stream a structured defer_text. Either
+        # way, Brain + all LLM providers are bypassed for THIS turn.
         if tool_errors and (search_query or repository):
-            text = _defer_tool_failure_text(
-                tool_errors,
-                repository=repository or "",
-                search_query=search_query or "",
+            from .skills.scenario_integration import (
+                policy_for_tool_error, format_policy_evidence,
             )
-            yield _sse({"type": "open", "provider": "aion", "model": "defer-gate"})
-            chunk = 48
-            for i in range(0, len(text), chunk):
-                yield _sse({"type": "delta", "text": text[i : i + chunk]})
-                await asyncio.sleep(0)
-            yield _sse({
-                "type": "done",
-                "streaming": False,
-                "provider": "aion",
-                "model": "defer-gate",
-                "finish_reason": "defer_tool_failure",
-            })
-            audit.record(
-                "chat.deferred_tool_failure",
-                {
-                    "subject": principal.subject,
-                    "request_id": mission.request_id,
-                    "errors": tool_errors[:5],
-                    "repository": repository or None,
-                },
+            from .skills.policy_action_map import actions_to_handlers
+            # Run the v2 matcher for the first errored tool. The v1 gate
+            # only ever looked at search/github; the v2 gate reasons
+            # about any tool (github, web, scrape, composio, render, …).
+            # tool_errors is a list of plain strings (str(exc)); the
+            # matching tool_events[].tool gives us the tool name.
+            err_event = next((e for e in tool_events if e.get("type") == "tool_error"), {})
+            tool_name = (
+                err_event.get("tool", "")
+                or ("github" if repository else "search" if search_query else "tool")
             )
+            err_text = (
+                err_event.get("message", "")
+                or err_event.get("error_code", "")
+                or (tool_errors[0] if tool_errors else "")
+            )
+            policy = policy_for_tool_error(
+                tool_name=str(tool_name), error_text=str(err_text),
+                subject=repository or search_query or None,
+            )
+            if policy["deferred"]:
+                # No real policy row matches. Stream fixed defer_text.
+                text = policy["defer_text"]
+                yield _sse({
+                    "type": "open", "provider": "aion", "model": "defer-gate",
+                    "deferred": True, "tool": tool_name,
+                    "trigger": policy.get("trigger", ""),
+                })
+                chunk = 48
+                for i in range(0, len(text), chunk):
+                    yield _sse({"type": "delta", "text": text[i : i + chunk]})
+                    await asyncio.sleep(0)
+                yield _sse({
+                    "type": "done",
+                    "streaming": False,
+                    "provider": "aion",
+                    "model": "defer-gate",
+                    "finish_reason": "defer_tool_failure",
+                    "deferred": True, "tool": tool_name,
+                })
+                audit.record(
+                    policy.get("defer_audit_code", "chat.deferred_tool_failure"),
+                    {
+                        "subject": principal.subject,
+                        "request_id": mission.request_id,
+                        "tool": tool_name,
+                        "trigger": policy.get("trigger", ""),
+                        "errors": tool_errors[:5],
+                        "repository": repository or None,
+                    },
+                )
+            else:
+                # Real policy row matches! Attach the if_action / else_action
+                # as policy_evidence on the defer event so the next turn can
+                # act on real data; still stream a defer refusal to keep
+                # the LLM out of the analysis for this turn.
+                evidence_md = format_policy_evidence(policy["matches"])
+                # Include the original error text (and the repository when
+                # known) so the operator sees WHICH tool call actually
+                # failed, not just the policy id.
+                err_summary = str(err_text)[:200]
+                repo_note = f" ({repository})" if repository else ""
+                text = (
+                    f"DEFER — tool {tool_name} failed{repo_note}: {err_summary}\n\n"
+                    f"Policy id: {policy['chosen']['id']} "
+                    f"(pack={policy['chosen']['pack']}, "
+                    f"score={policy['chosen']['score']}, "
+                    f"severity={policy['chosen']['severity']})\n\n"
+                    f"{evidence_md}\n"
+                    f"Reason: {policy['reason']}"
+                )
+                yield _sse({
+                    "type": "open", "provider": "aion", "model": "defer-gate",
+                    "deferred": False,
+                    "policy_id": policy["chosen"]["id"],
+                    "policy_pack": policy["chosen"]["pack"],
+                    "policy_score": policy["chosen"]["score"],
+                    "tool": tool_name,
+                })
+                chunk = 48
+                for i in range(0, len(text), chunk):
+                    yield _sse({"type": "delta", "text": text[i : i + chunk]})
+                    await asyncio.sleep(0)
+                # P3: map the if/else_action phrases to a concrete handler
+                # id so the operator (and the next turn) can act on the
+                # decision without re-deriving it.
+                handlers = actions_to_handlers(
+                    policy["chosen"].get("if_action"),
+                    policy["chosen"].get("else_action"),
+                )
+                yield _sse({
+                    "type": "done",
+                    "streaming": False,
+                    "provider": "aion",
+                    "model": "defer-gate",
+                    "finish_reason": "defer_tool_failure_with_policy",
+                    "deferred": False,
+                    "policy_id": policy["chosen"]["id"],
+                    "policy_pack": policy["chosen"].get("pack"),
+                    "policy_score": policy["chosen"].get("score"),
+                    "policy_handler_if": handlers.get("if"),
+                    "policy_handler_else": handlers.get("else"),
+                })
+                audit.record(
+                    "chat.deferred_tool_failure_with_policy",
+                    {
+                        "subject": principal.subject,
+                        "request_id": mission.request_id,
+                        "tool": tool_name,
+                        "policy_id": policy["chosen"]["id"],
+                        "policy_pack": policy["chosen"]["pack"],
+                        "policy_score": policy["chosen"]["score"],
+                        "trigger": policy.get("trigger", ""),
+                        "errors": tool_errors[:5],
+                        "repository": repository or None,
+                    },
+                )
             yield b"data: [DONE]\n\n"
             return
 
