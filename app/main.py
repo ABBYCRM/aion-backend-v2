@@ -88,7 +88,7 @@ class DecisionRequest(BaseModel):
 class NoteBody(BaseModel):
     name: str = Field(min_length=1, max_length=200); kind: Literal["note", "project", "url", "instruction"] = "note"; value: str = Field(min_length=1, max_length=20000); tags: list[str] = Field(default_factory=list, max_length=20)
 class SearchBody(BaseModel):
-    query: str = Field(min_length=1, max_length=400); count: int = Field(default=6, ge=1, le=20); freshness: Literal["pd", "pw", "pm", "py"] | None = None
+    query: str = Field(min_length=1, max_length=400); count: int = Field(default=12, ge=1, le=20); offset: int = Field(default=0, ge=0, le=9); freshness: Literal["pd", "pw", "pm", "py"] | None = None
 class GitHubRepoBody(BaseModel): repository: str = Field(min_length=3, max_length=200)
 class GitHubFileBody(GitHubRepoBody): path: str = Field(min_length=1, max_length=1000); ref: str | None = Field(default=None, max_length=200)
 class GitHubSearchBody(GitHubRepoBody): query: str = Field(min_length=1, max_length=200); limit: int = Field(default=10, ge=1, le=30)
@@ -590,7 +590,26 @@ async def decision(body: DecisionRequest, principal: Principal = Depends(authent
     return {"request_id": context.request_id, "decision": result.to_dict()}
 @app.post("/api/search")
 async def search(body: SearchBody, _: Principal = Depends(authenticated)):
-    results = await web_search.search(body.query, count=body.count, freshness=body.freshness); return {"query": body.query, "results": [result.__dict__ for result in results], "count": len(results)}
+    """Granular + exhaustive web search. Returns the merged Brave+DDG
+    results with provider/position/score/dedup/extra_snippets per row.
+    Pass `offset` to paginate (Brave supports offset 0-9; the chain
+    uses the offset to fetch a different page when possible)."""
+    results = await web_search.search(body.query, count=body.count, freshness=body.freshness, offset=body.offset)
+    rows = [result.__dict__ for result in results]
+    # Coerce the extra_snippets tuple to a list for JSON (dataclasses
+    # already do this via __dict__ but tuples are not JSON-native).
+    for row in rows:
+        if isinstance(row.get("extra_snippets"), tuple):
+            row["extra_snippets"] = list(row["extra_snippets"])
+    providers = sorted({r.provider for r in results if r.provider and r.provider != "unknown"})
+    return {
+        "query": body.query,
+        "results": rows,
+        "count": len(results),
+        "offset": body.offset,
+        "providers": providers,
+        "fetched_at": int(__import__("time").time()),
+    }
 async def _github_ready() -> None:
     if not (settings.github_token or settings.github_app_configured):
         raise ToolConfigurationError("github_not_configured")

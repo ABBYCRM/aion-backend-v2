@@ -3137,3 +3137,195 @@ def test_chat_slash_websearch_alias_fires_web_search(_vault_db, monkeypatch):
     m = _re.search(r'"type":"tools_used"[^}]*"tools":\[[^\]]*\]', text)
     assert m is not None, f"no tools_used event in SSE: {text[:300]}"
     assert "web_search" in m.group(0), f"/websearch did not fire web_search: {m.group(0)}"
+
+
+# =============================================================================
+# Web search exhaustiveness + granularity: each result must carry
+# provider/position/score/dedup/extra_snippets/query_highlight, the
+# chain must dedupe across providers, and the /api/search response
+# must surface the offset + provider list for the operator UI.
+# =============================================================================
+
+def test_web_result_has_granularity_fields():
+    """WebResult dataclass must expose the full granularity set:
+    title, url, snippet, published_at, provider, position, score,
+    dedup, extra_snippets, query_highlight. These flow through to
+    /api/search JSON and to the as_context() system-prompt block."""
+    from app.tools import WebResult
+    r = WebResult(
+        title="t", url="https://x", snippet="s", published_at=None,
+        provider="brave", position=3, score=3.0, dedup="first",
+        extra_snippets=("a", "b"), query_highlight="x y z",
+    )
+    assert r.title == "t"
+    assert r.provider == "brave"
+    assert r.position == 3
+    assert r.score == 3.0
+    assert r.dedup == "first"
+    assert r.extra_snippets == ("a", "b")
+    assert r.query_highlight == "x y z"
+
+
+def test_brave_search_populates_granularity(monkeypatch):
+    """BraveSearch.search must populate provider=brave, position,
+    score, dedup, extra_snippets, query_highlight for every row.
+    We mock the Brave HTTP response and check the WebResult fields."""
+    import httpx
+    from app.tools import BraveSearch
+    fake_response = {
+        "web": {
+            "results": [
+                {
+                    "title": "First result",
+                    "url": "https://example.com/a",
+                    "description": "First snippet",
+                    "extra_snippets": ["More from page 1", "Even more"],
+                    "snippet": "Page with <mark>term</mark> highlighted",
+                    "age": "2 days ago",
+                },
+                {
+                    "title": "Second result",
+                    "url": "https://example.com/b",
+                    "description": "Second snippet",
+                    "extra_snippets": [],
+                    "snippet": "Another page",
+                },
+            ]
+        }
+    }
+    class FakeResp:
+        status_code = 200
+        def json(self_inner): return fake_response
+    class FakeClient:
+        def __init__(self_inner, *a, **k): pass
+        async def __aenter__(self_inner): return self_inner
+        async def __aexit__(self_inner, *a): return False
+        async def get(self_inner, *a, **k): return FakeResp()
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    # settings reads env at module import; we must reload to pick it up.
+    import importlib
+    import app.settings as s
+    importlib.reload(s)
+    import app.tools as t
+    importlib.reload(t)
+    async def run():
+        with __import__("unittest.mock").mock.patch("httpx.AsyncClient", FakeClient):
+            return await t.BraveSearch().search("test", count=5)
+    import asyncio
+    results = asyncio.run(run())
+    assert len(results) == 2
+    r0 = results[0]
+    assert r0.provider == "brave"
+    assert r0.position == 1
+    assert r0.score == 1.0
+    assert r0.dedup == "first"
+    assert r0.extra_snippets == ("More from page 1", "Even more")
+    assert r0.query_highlight == "Page with term highlighted"  # <mark> stripped
+    assert r0.published_at == "2 days ago"
+    r1 = results[1]
+    assert r1.position == 2
+    assert r1.score == 2.0
+    assert r1.extra_snippets == ()
+
+
+def test_search_endpoint_returns_provider_list_and_offset(monkeypatch):
+    """/api/search response must include `providers` (the list of
+    providers that contributed rows) and the requested `offset` so
+    the operator UI can paginate."""
+    from fastapi.testclient import TestClient
+    from app import main as main_mod
+    # Patch the chain to return a fixed result set with mixed providers
+    from app.tools import WebResult
+    async def fake_search(query, *, count=None, freshness=None, offset=0):
+        return [
+            WebResult(title="Brave row", url="https://a", snippet="x",
+                      provider="brave", position=1, score=1.0, dedup="first"),
+            WebResult(title="DDG row", url="https://b", snippet="y",
+                      provider="ddg", position=2, score=2.0, dedup="first"),
+        ]
+    monkeypatch.setattr("app.main.web_search.search", fake_search)
+    client = TestClient(main_mod.app)
+    r = client.post(
+        "/api/search",
+        headers=USER_HEADERS,
+        json={"query": "x", "count": 5, "offset": 0},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    assert body["offset"] == 0
+    assert sorted(body["providers"]) == ["brave", "ddg"]
+    assert "fetched_at" in body
+    # Each result must carry the new fields
+    for row in body["results"]:
+        assert "provider" in row
+        assert "position" in row
+        assert "score" in row
+        assert "dedup" in row
+        assert "extra_snippets" in row
+        assert "query_highlight" in row
+
+
+def test_chained_web_search_dedupes_brave_and_ddg(monkeypatch):
+    """When Brave and DDG both return the same URL, the chain must
+    return it only once and mark the provider as 'brave' (Brave wins
+    because it ranks first)."""
+    from app.search_ddg import ChainedWebSearch
+    from app.tools import WebResult
+    # Mock providers
+    class FakeBrave:
+        async def search(self, q, *, count=None, freshness=None, offset=0):
+            return [
+                WebResult(title="A", url="https://x.com/p?q=1", snippet="brave",
+                          provider="brave", position=1, score=1.0, dedup="first"),
+                WebResult(title="B", url="https://x.com/r", snippet="brave",
+                          provider="brave", position=2, score=2.0, dedup="first"),
+            ]
+    class FakeDDG:
+        async def search(self, q, *, count=None, freshness=None, offset=0):
+            return [
+                WebResult(title="A dup", url="https://x.com/p?q=1", snippet="ddg",
+                          provider="ddg", position=1, score=1.0, dedup="first"),
+                WebResult(title="C", url="https://x.com/s", snippet="ddg",
+                          provider="ddg", position=2, score=2.0, dedup="first"),
+            ]
+    import asyncio
+    # Reload first so settings.brave_api_key is set from BRAVE_API_KEY
+    # env (the test must set it via monkeypatch.setenv BEFORE reload).
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    import importlib
+    import app.settings as s
+    importlib.reload(s)
+    import app.search_ddg as sd
+    importlib.reload(sd)
+    chain = sd.ChainedWebSearch(brave=FakeBrave(), ddg=FakeDDG())
+    async def run():
+        return await chain.search("test", count=3)
+    results = asyncio.run(run())
+    # We should have 3 unique results: A (brave), B (brave), C (ddg)
+    urls = [r.url for r in results]
+    assert len(urls) == 3
+    assert urls.count("https://x.com/p?q=1") == 1
+    assert urls.count("https://x.com/r") == 1
+    assert urls.count("https://x.com/s") == 1
+    # The dup must be the brave one (Brave wins)
+    dup = next(r for r in results if r.url == "https://x.com/p?q=1")
+    assert dup.provider == "brave"
+
+
+def test_brave_as_context_includes_provider_and_score(monkeypatch):
+    """as_context (the system-prompt block the LLM sees) must include
+    provider and score per row. This is the granularity the operator
+    wants — every citation should be traceable to its source."""
+    from app.tools import BraveSearch, WebResult
+    results = [
+        WebResult(title="A", url="https://a", snippet="snip", provider="brave",
+                  position=1, score=1.0, dedup="first", extra_snippets=("more",),
+                  query_highlight="A query here"),
+    ]
+    ctx = BraveSearch.as_context(results)
+    assert "[provider=brave]" in ctx
+    assert "[score=1]" in ctx
+    assert "Extras: more" in ctx
+    assert "Match: A query here" in ctx
+    assert "URL: https://a" in ctx

@@ -137,7 +137,7 @@ class Settings:
             fallback_models=_csv(os.getenv("FALLBACK_MODELS", "nvidia/nemotron-3-super-120b-a12b,deepseek/deepseek-chat")),
             brave_api_key=os.getenv("BRAVE_API_KEY", "").strip(),
             brave_base_url=os.getenv("BRAVE_BASE_URL", "https://api.search.brave.com/res/v1/web/search").strip(),
-            web_search_max_results=_int("WEB_SEARCH_MAX_RESULTS", 6, minimum=1, maximum=20),
+            web_search_max_results=_int("WEB_SEARCH_MAX_RESULTS", 12, minimum=1, maximum=20),
             github_token=os.getenv("GITHUB_TOKEN", "").strip(),
             github_app_id=os.getenv("GITHUB_APP_ID", "").strip(),
             github_installation_id=os.getenv("GITHUB_INSTALLATION_ID", "").strip(),

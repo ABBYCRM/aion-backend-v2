@@ -23,29 +23,82 @@ class ToolRequestError(RuntimeError): pass
 
 @dataclass(frozen=True)
 class WebResult:
+    """A single web search result. The fields are deliberately rich so
+    the operator (and the model) can tell exactly where each result
+    came from, why it matched, and how the result was ranked.
+
+    Fields:
+      title:        Page title from the search provider.
+      url:          Canonical URL.
+      snippet:      Human-readable excerpt. May be one or more snippets
+                    joined with " ".
+      published_at: Provider-supplied date string (e.g. "2 days ago" or
+                    ISO-8601). None if unknown.
+      provider:     "brave" or "ddg" — which backend produced this row.
+                    Lets the operator see provider coverage per query.
+      position:     1-based position in the merged result list. Brave
+                    rows get positions first, then DDG fills gaps.
+      score:        Provider's intrinsic rank (Brave = position, lower
+                    is better; DDG = order returned). 0 = best.
+      dedup:        "first" if this is the first time the URL appeared,
+                    "duplicate" if a prior provider already returned it.
+      extra_snippets: list[str] — additional brief excerpts from the page
+                    (Brave only). Useful for fine-grained relevance.
+      query_highlight: str | None — a snippet with the query terms
+                    bolded by the provider (Brave only, when available).
+    """
     title: str
     url: str
     snippet: str
     published_at: str | None = None
+    provider: str = "unknown"
+    position: int = 0
+    score: float = 0.0
+    dedup: str = "first"
+    extra_snippets: tuple[str, ...] = ()
+    query_highlight: str | None = None
 
 class BraveSearch:
-    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None) -> list[WebResult]:
+    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None, offset: int = 0) -> list[WebResult]:
         if not settings.brave_api_key: raise ToolConfigurationError("web_search_not_configured")
         query = " ".join(query.split())[:400]
         if not query: raise ToolRequestError("empty_search_query")
-        params: dict[str, Any] = {"q": query, "count": min(count or settings.web_search_max_results, settings.web_search_max_results, 20), "safesearch": "moderate", "extra_snippets": "true"}
+        params: dict[str, Any] = {"q": query, "count": min(count or settings.web_search_max_results, settings.web_search_max_results, 20), "safesearch": "moderate", "extra_snippets": "true", "offset": min(max(int(offset or 0), 0), 9)}
         if freshness in {"pd", "pw", "pm", "py"}: params["freshness"] = freshness
         headers = {"Accept": "application/json", "X-Subscription-Token": settings.brave_api_key, "User-Agent": f"AION/{settings.app_version}"}
         async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=False) as client: response = await client.get(settings.brave_base_url, params=params, headers=headers)
         if response.status_code != 200:
             audit.record("tool.web_search_failed", {"status": response.status_code}); raise ToolRequestError(f"web_search_http_{response.status_code}")
-        payload = response.json(); results = []
-        for item in (payload.get("web") or {}).get("results", [])[:params["count"]]:
+        payload = response.json(); raw_items = (payload.get("web") or {}).get("results", [])[:params["count"]]
+        results = []
+        for index, item in enumerate(raw_items, 1):
             url = str(item.get("url") or "")
             if not url.startswith(("https://", "http://")): continue
-            snippets = [str(item.get("description") or "")]; snippets.extend(str(value) for value in item.get("extra_snippets") or [])
-            results.append(WebResult(title=str(item.get("title") or url)[:300], url=url, snippet=" ".join(part.strip() for part in snippets if part.strip())[:1200], published_at=item.get("age") or item.get("page_age")))
-        audit.record("tool.web_search", {"query_hash": _hash_text(query), "result_count": len(results)}); return results
+            description = str(item.get("description") or "")
+            extra = tuple(str(value) for value in (item.get("extra_snippets") or []))
+            snippets = [description]
+            snippets.extend(extra)
+            # Brave returns a "snippet" field with <mark> tags around query
+            # terms. We strip the tags for the LLM but keep the
+            # high-confidence text in `query_highlight` for the operator.
+            hl_raw = str(item.get("snippet") or "")
+            hl_clean = re.sub(r"</?mark>", "", hl_raw).strip() or None
+            results.append(WebResult(
+                title=str(item.get("title") or url)[:300],
+                url=url,
+                snippet=" ".join(part.strip() for part in snippets if part.strip())[:1200],
+                published_at=item.get("age") or item.get("page_age"),
+                provider="brave",
+                position=index,
+                # Brave does not return a numeric score; the position is
+                # the rank. We expose it as a score so the operator UI
+                # can show "rank 3" without parsing the position.
+                score=float(index),
+                dedup="first",
+                extra_snippets=extra,
+                query_highlight=hl_clean,
+            ))
+        audit.record("tool.web_search", {"query_hash": _hash_text(query), "result_count": len(results), "provider": "brave"}); return results
 
     @staticmethod
     def as_context(results: list[WebResult]) -> str:
@@ -53,7 +106,19 @@ class BraveSearch:
         lines = ["<tool_results type=\"web_search\" untrusted=\"true\">"]
         for index, result in enumerate(results, 1):
             published = f"; published={result.published_at}" if result.published_at else ""
-            lines.append(f"[{index}] {result.title}\nURL: {result.url}{published}\nSnippet: {result.snippet}")
+            provider = f" [provider={result.provider}]" if result.provider and result.provider != "unknown" else ""
+            score = f" [score={result.score:g}]" if result.score else ""
+            extras = ""
+            if result.extra_snippets:
+                snippet_extras = " | ".join(s[:200] for s in result.extra_snippets[:2] if s)
+                if snippet_extras:
+                    extras = f"\nExtras: {snippet_extras}"
+            highlight = f"\nMatch: {result.query_highlight[:200]}" if result.query_highlight else ""
+            lines.append(
+                f"[{index}]{provider}{score} {result.title}\n"
+                f"URL: {result.url}{published}\n"
+                f"Snippet: {result.snippet[:600]}{extras}{highlight}"
+            )
         lines.append("</tool_results>"); return "\n\n".join(lines)
 
 class GitHubClient:

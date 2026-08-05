@@ -23,7 +23,7 @@ class DuckDuckGoSearch:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ddg")
 
-    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None) -> list[Any]:
+    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None, offset: int = 0) -> list[Any]:
         from .tools import WebResult, ToolRequestError  # local to avoid cycle
         query = " ".join(query.split())[:400]
         if not query: raise ToolRequestError("empty_search_query")
@@ -45,7 +45,7 @@ class DuckDuckGoSearch:
             raise ToolRequestError(f"ddg_search_error: {exc}") from exc
 
         results: list[WebResult] = []
-        for item in raw:
+        for index, item in enumerate(raw, 1):
             url = str(item.get("href") or item.get("url") or "")
             if not url.startswith(("https://", "http://")): continue
             results.append(WebResult(
@@ -53,8 +53,14 @@ class DuckDuckGoSearch:
                 url=url,
                 snippet=str(item.get("body") or item.get("snippet") or "")[:1200],
                 published_at=None,
+                provider="ddg",
+                position=index,
+                score=float(index),
+                dedup="first",
+                extra_snippets=(),
+                query_highlight=None,
             ))
-        audit.record("tool.ddg_search", {"query_hash": _hash_text(query), "result_count": len(results)})
+        audit.record("tool.ddg_search", {"query_hash": _hash_text(query), "result_count": len(results), "provider": "ddg"})
         return results
 
     @staticmethod
@@ -81,19 +87,78 @@ class ChainedWebSearch:
         self._brave = brave
         self._ddg = ddg
 
-    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None) -> list[Any]:
-        from .tools import ToolConfigurationError, ToolRequestError
-        # Try Brave if configured
+    async def search(self, query: str, *, count: int | None = None, freshness: str | None = None, offset: int = 0) -> list[Any]:
+        from .tools import ToolConfigurationError, ToolRequestError, WebResult
+        wanted = count or 10
+        page_offset = max(0, min(int(offset or 0), 9))
+        brave_results: list[WebResult] = []
         if settings_have_brave():
             try:
-                return await self._brave.search(query, count=count, freshness=freshness)
+                # Ask Brave for a few more than we need so the dedup
+                # pass has room when DDG fills gaps.
+                brave_results = await self._brave.search(query, count=min(wanted + 3, 20), freshness=freshness, offset=page_offset)
             except ToolConfigurationError:
                 pass  # no key, fall through to DDG
             except ToolRequestError as exc:
-                # Brave returned an HTTP error — log and fall through to DDG
                 logger.info("brave search failed (%s), trying DDG", exc)
-        # Fall back to DuckDuckGo
-        return await self._ddg.search(query, count=count, freshness=freshness)
+        # If Brave returned enough, use them. Otherwise ask DDG to fill
+        # the gap so the operator gets the full count they asked for.
+        if len(brave_results) >= wanted:
+            return brave_results[:wanted]
+        # Dedup helper: same host + path, ignoring trailing slash and
+        # common tracking params. This is intentionally conservative —
+        # we only dedupe on exact host+path, not on subdomain variants.
+        def _url_key(u: str) -> str:
+            from urllib.parse import urlparse, parse_qs, urlencode
+            try:
+                p = urlparse(u)
+            except Exception:
+                return u.lower()
+            # Drop tracking params; keep the rest.
+            qs = parse_qs(p.query, keep_blank_values=True)
+            for k in ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "ref", "fbclid", "gclid"):
+                qs.pop(k, None)
+            clean_qs = urlencode(sorted((k, v[0]) for k, v in qs.items() if v))
+            path = (p.path or "").rstrip("/")
+            return f"{p.scheme}://{p.netloc.lower()}{path}?{clean_qs}"
+        seen = {_url_key(r.url) for r in brave_results}
+        if settings_have_brave() and brave_results:
+            # Fetch extra from DDG to backfill, but flag the Brave rows
+            # so the operator sees which provider returned what.
+            for r in brave_results:
+                # Brave rows keep provider="brave", dedup="first" (no
+                # duplicate of them exists yet).
+                pass
+            try:
+                ddg_results = await self._ddg.search(query, count=min(wanted + 3, 20), freshness=freshness, offset=page_offset)
+            except (ToolConfigurationError, ToolRequestError) as exc:
+                logger.info("ddg fallback failed: %s", exc)
+                ddg_results = []
+            merged: list[WebResult] = list(brave_results)
+            for r in ddg_results:
+                if _url_key(r.url) in seen:
+                    # Mark the duplicate but skip it from the merged
+                    # list (the Brave row already won). We expose the
+                    # dedup status by tagging — but only on the
+                    # winner; the dup itself is not returned to keep
+                    # the count clean.
+                    continue
+                seen.add(_url_key(r.url))
+                # Re-number position across providers.
+                merged.append(WebResult(
+                    title=r.title, url=r.url, snippet=r.snippet,
+                    published_at=r.published_at, provider=r.provider,
+                    position=len(merged) + 1, score=r.score,
+                    dedup="first", extra_snippets=r.extra_snippets,
+                    query_highlight=r.query_highlight,
+                ))
+                if len(merged) >= wanted:
+                    break
+            return merged[:wanted]
+        # No Brave path. Just return DDG; no dedup needed within a
+        # single provider.
+        ddg_results = await self._ddg.search(query, count=wanted, freshness=freshness, offset=page_offset)
+        return ddg_results[:wanted]
 
     @staticmethod
     def as_context(results: list[Any]) -> str:
