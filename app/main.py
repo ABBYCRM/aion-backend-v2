@@ -633,11 +633,13 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     last_user = next((message for message in reversed(body.messages) if message.role == "user"), None)
     if last_user is None: raise HTTPException(status_code=400, detail="user_message_required")
     user_text = last_user.text_content(); tool_contexts = []; tool_events = []; tool_errors = []
-    # Phase 1: resolve the web search query from BOTH the /search prefix
-    # AND plain English intent (site:github.com, site:linkedin.com). The
-    # legacy _search_query still drives the ChatRequest.web_search toggle.
-    explicit_q = _search_query(body.web_search, user_text)
-    search_query = resolve_web_query(user_text, explicit_q)
+    # Phase 1: resolve the web search query. resolve_web_query handles
+    # BOTH the /search prefix AND plain English intent. _search_query
+    # is only consulted when the user text has no intent and web_search
+    # toggle is on (general-knowledge queries that should still search).
+    search_query = resolve_web_query(user_text, None)
+    if not search_query and body.web_search:
+        search_query = _search_query(True, user_text)
     if search_query:
         try:
             results = await web_search.search(search_query); context = web_search.as_context(results)
@@ -1109,6 +1111,7 @@ _GH_SEARCH_INTENT = re.compile(
     r"\b("
     r"search\s+github(\.com)?\s+for\b|"
     r"github(\.com)?\s+search\b|"
+    r"github(\.com)?\s+for\b|"  # bare "github.com for X" / "github for X"
     r"find\s+(a\s+)?(repos?|repositories|repository|projects?)\s+(on\s+)?github\b|"
     r"search\s+(repos?|repositories)\s+for\b"
     r")\s*(?P<q>.+)$",
@@ -1179,11 +1182,15 @@ def _search_query(enabled, text):
     if not enabled:
         return ""
     if _is_github_intent(stripped):
-        # Suppress web search for github.com / "search github" — let the
-        # github.search tool handle the lookup. Web search on these queries
-        # returns SEO-blog spam about GitHub the website, not the actual
-        # repos the user wants.
-        return ""
+        # Do NOT suppress web search for github intent. Let
+        # resolve_web_query produce "site:github.com <terms>" and let
+        # the web search return real github.com results. github.search
+        # is per-repo and cannot do global topic search; the web
+        # search restricted to site:github.com is the correct path.
+        # (See commit d191033 for the intent router — but the per-repo
+        # github tool cannot answer "find repos about X", only
+        # "search code in owner/repo".)
+        return stripped[:400]
     return stripped[:400]
 def _defer_tool_failure_text(tool_errors, *, repository: str = "", search_query: str = "") -> str:
     """Hardcoded refusal streamed to the client when the kernel DEFERs

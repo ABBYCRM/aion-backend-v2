@@ -2078,23 +2078,22 @@ def test_is_github_intent_detects_common_phrases():
     assert _is_github_intent(None) is False
 
 
-def test_search_query_suppresses_web_for_github_intent():
-    """When the user turn is GITHUB intent and web_search is enabled, the
-    web search query must be empty so chat() does not fire a redundant
-    web search that returns SEO-blog spam about GitHub the website."""
+def test_search_query_no_longer_suppresses_github_intent():
+    """_search_query no longer suppresses web search for github intent.
+    The intent routing is now in resolve_web_query, which returns
+    'site:github.com <terms>' for plain English github intent. _search_query
+    just returns the user text unchanged; chat() passes it through
+    resolve_web_query to get the site: filter."""
     from app.main import _search_query
-    # Enabled, github intent -> empty (web search suppressed)
-    assert _search_query(True, "github.com for agentic software") == ""
-    assert _search_query(True, "search github for kafka") == ""
-    assert _search_query(True, "find a repo for python linter") == ""
-    # Enabled, NOT github intent -> full text returned (existing behavior)
+    # _search_query is now a thin pass-through for github intent
+    assert _search_query(True, "github.com for agentic software") == "github.com for agentic software"
+    assert _search_query(True, "search github for kafka") == "search github for kafka"
+    # Non-github text still passes through
     assert _search_query(True, "what is the weather") == "what is the weather"
-    # /search prefix still works (explicit web search command)
+    # /search prefix still strips the prefix (existing behavior)
     assert _search_query(True, "/search python linter tutorials") == "python linter tutorials"
-    # Disabled -> empty (existing behavior)
+    # Disabled -> empty
     assert _search_query(False, "github.com for foo") == ""
-    # /search prefix overrides github intent (explicit override)
-    assert _search_query(True, "/search github for kafka") == "github for kafka"
 
 
 def test_search_query_does_not_over_trigger_for_lookalikes():
@@ -2159,12 +2158,13 @@ def test_tools_used_sse_event_fires_in_chat_stream(_vault_db, monkeypatch):
     assert found, f"expected tools_used:[web_search] in stream, got: {r.text[:400]}"
 
 
-def test_tools_used_sse_event_routes_github_intent_to_github(_vault_db, monkeypatch):
-    """When the user turn matches github-intent, tools_used must show
-    github_search (not web_search). This locks the operator's main
-    complaint: web search returning SEO spam for github queries."""
+def test_tools_used_sse_event_routes_github_intent_to_site_web_search(_vault_db, monkeypatch):
+    """When the user turn matches github-intent, the chat handler must
+    fire web_search (with site:github.com restriction) — NOT the
+    per-repo github.search tool, which cannot do global topic search.
+    This locks the operator's main complaint."""
     monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_12345")  # enable intent-router
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_12345")
     import importlib
     from app import settings, main as main_mod
     importlib.reload(settings)
@@ -2176,16 +2176,17 @@ def test_tools_used_sse_event_routes_github_intent_to_github(_vault_db, monkeypa
         json={"messages": [{"role": "user", "content": "github.com for agentic software"}], "web_search": True, "max_tokens": 64, "temperature": 0},
     )
     assert r.status_code == 200
-    # First event should be tools_used with github_search
+    # Find the tools_used event
     first_event = None
     for line in r.text.splitlines():
         if line.startswith("data:") and "tools_used" in line:
             first_event = line
             break
     assert first_event is not None, f"no tools_used event in stream: {r.text[:400]}"
-    # Must contain github_search, must NOT contain web_search
-    assert "github_search" in first_event, f"expected github_search in tools_used: {first_event}"
-    assert "web_search" not in first_event, f"web_search should be suppressed: {first_event}"
+    # Must contain web_search
+    assert "web_search" in first_event, f"expected web_search in tools_used: {first_event}"
+    # The query that the web search actually used must be site:github.com
+    assert "site:github.com" in r.text, f"expected site:github.com in stream: {r.text[:600]}"
 
 
 def test_kernel_system_prompt_contains_anti_denial_theater_clause():
