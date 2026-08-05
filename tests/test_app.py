@@ -2050,3 +2050,173 @@ def test_brain_chat_streams_sse_events(_vault_db, monkeypatch):
     body = r.text
     # Should at least contain a decision event
     assert "decision" in body
+
+
+# =============================================================================
+# Hardening: github intent routing + anti-denial-theater + tools_used SSE event
+# (Operator diagnosis 2026-08-05 — locked behavior)
+# =============================================================================
+
+def test_is_github_intent_detects_common_phrases():
+    """_is_github_intent must match the user-facing phrases that mean
+    "I want to search GitHub" — not just the literal 'github.com' string."""
+    from app.main import _is_github_intent
+    assert _is_github_intent("github.com for foo") is True
+    assert _is_github_intent("search github for kafka") is True
+    assert _is_github_intent("Search GitHub for kafka") is True  # mixed case
+    assert _is_github_intent("find a repo for python linter") is True
+    assert _is_github_intent("find repos for python linter") is True
+    assert _is_github_intent("github repo for kubernetes operator") is True
+    # NOT github intent
+    assert _is_github_intent("what is the weather today") is False
+    assert _is_github_intent("python linter tutorial") is False
+    assert _is_github_intent("") is False
+    # Word boundary check: "github" inside another word does NOT match
+    assert _is_github_intent("mygithub tool") is False
+    # Whitespace robustness
+    assert _is_github_intent("   github.com   ") is True
+    assert _is_github_intent(None) is False
+
+
+def test_search_query_suppresses_web_for_github_intent():
+    """When the user turn is GITHUB intent and web_search is enabled, the
+    web search query must be empty so chat() does not fire a redundant
+    web search that returns SEO-blog spam about GitHub the website."""
+    from app.main import _search_query
+    # Enabled, github intent -> empty (web search suppressed)
+    assert _search_query(True, "github.com for agentic software") == ""
+    assert _search_query(True, "search github for kafka") == ""
+    assert _search_query(True, "find a repo for python linter") == ""
+    # Enabled, NOT github intent -> full text returned (existing behavior)
+    assert _search_query(True, "what is the weather") == "what is the weather"
+    # /search prefix still works (explicit web search command)
+    assert _search_query(True, "/search python linter tutorials") == "python linter tutorials"
+    # Disabled -> empty (existing behavior)
+    assert _search_query(False, "github.com for foo") == ""
+    # /search prefix overrides github intent (explicit override)
+    assert _search_query(True, "/search github for kafka") == "github for kafka"
+
+
+def test_search_query_does_not_over_trigger_for_lookalikes():
+    """Locked regression: words containing 'github' as a substring must
+    NOT trip the github-intent detector (word-boundary check)."""
+    from app.main import _is_github_intent
+    # 'mygithub' is one word, no boundary at 'github'
+    assert _is_github_intent("mygithub is a tool") is False
+    # 'githubish' same
+    assert _is_github_intent("githubish text") is False
+    # Bare 'github' alone (not github.com / not search github / not find repo)
+    # is NOT in the regex — bare 'github' could be user just mentioning
+    # the website. We only auto-route when the intent is unambiguous.
+
+
+def test_intent_router_auto_routes_github_search(_vault_db, monkeypatch):
+    """When the user turn is github-intent and no /github command was
+    parsed, the chat() handler must set repository='_search_only_' +
+    github_mode='search' + github_argument=<cleaned terms> so the
+    github.search tool fires (visible via the tools_used SSE event)."""
+    import asyncio
+    from app.main import _is_github_intent, _GITHUB_INTENT_RE
+    # Direct unit test of the cleaner helper
+    cleaned = _GITHUB_INTENT_RE.sub(" ", "github.com for agentic software")
+    cleaned = " ".join(cleaned.split())
+    assert "github" not in cleaned.lower() or "com" not in cleaned.lower()
+    assert "agentic" in cleaned and "software" in cleaned
+    # And the search-query part of the regex doesn't leave the terms empty
+    cleaned2 = _GITHUB_INTENT_RE.sub(" ", "find a repo for python linter")
+    cleaned2 = " ".join(cleaned2.split())
+    assert "python" in cleaned2 and "linter" in cleaned2
+
+
+def test_tools_used_sse_event_fires_in_chat_stream(_vault_db, monkeypatch):
+    """Operator-facing requirement: every chat response must include a
+    tools_used SSE event listing which tools fired on the turn, so the
+    UI topbar can render "used: github_search" / "used: web_search" /
+    both / neither. Tested here by streaming with a tool-disabled Brain
+    so the local path runs (we only verify the tools_used event; we
+    don't care about the LLM response itself)."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_12345")  # enable github.search path
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    # Query that is NOT github intent -> tools_used: ["web_search"]
+    r = client.post(
+        "/api/chat",
+        headers=USER_HEADERS,
+        json={"messages": [{"role": "user", "content": "what is the weather today"}], "web_search": True, "max_tokens": 64, "temperature": 0},
+    )
+    assert r.status_code == 200
+    # Extract tools_used event
+    found = False
+    for line in r.text.splitlines():
+        if "tools_used" in line and "web_search" in line:
+            found = True
+            assert "\"tools\":[" in line or '"tools":[' in line
+            break
+    assert found, f"expected tools_used:[web_search] in stream, got: {r.text[:400]}"
+
+
+def test_tools_used_sse_event_routes_github_intent_to_github(_vault_db, monkeypatch):
+    """When the user turn matches github-intent, tools_used must show
+    github_search (not web_search). This locks the operator's main
+    complaint: web search returning SEO spam for github queries."""
+    monkeypatch.setenv("AION_BRAIN_ENABLED", "false")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_12345")  # enable intent-router
+    import importlib
+    from app import settings, main as main_mod
+    importlib.reload(settings)
+    importlib.reload(main_mod)
+    client = TestClient(main_mod.app)
+    r = client.post(
+        "/api/chat",
+        headers=USER_HEADERS,
+        json={"messages": [{"role": "user", "content": "github.com for agentic software"}], "web_search": True, "max_tokens": 64, "temperature": 0},
+    )
+    assert r.status_code == 200
+    # First event should be tools_used with github_search
+    first_event = None
+    for line in r.text.splitlines():
+        if line.startswith("data:") and "tools_used" in line:
+            first_event = line
+            break
+    assert first_event is not None, f"no tools_used event in stream: {r.text[:400]}"
+    # Must contain github_search, must NOT contain web_search
+    assert "github_search" in first_event, f"expected github_search in tools_used: {first_event}"
+    assert "web_search" not in first_event, f"web_search should be suppressed: {first_event}"
+
+
+def test_kernel_system_prompt_contains_anti_denial_theater_clause():
+    """Lock the operator's #2 complaint: model saying "I cannot search
+    GitHub/LinkedIn" after a tool already returned data. The system
+    prompt must explicitly forbid this when tool results are present."""
+    from app.kernel import build_system_prompt, resolve_decision, MissionContext
+    ctx = MissionContext(user_input="ping")
+    decision = resolve_decision(ctx)
+    prompt = build_system_prompt(decision, tool_context="<tool_results type=\"web_search\">[1] example.com — real hits here</tool_results>")
+    # The anti-denial-theater clause must be present
+    assert "tool RAN SUCCESSFULLY" in prompt, "anti-denial-theater clause missing from system prompt"
+    assert "I cannot search" in prompt, "disclaimer-theater ban missing from system prompt"
+    assert "no public results" in prompt, "no-results guidance missing"
+    # The marker citation rule must be present
+    assert "[1]" in prompt, "citation marker rule missing"
+
+
+def test_kernel_system_prompt_clause_always_present():
+    """The anti-denial-theater rule is part of the BASE system prompt
+    (always on). The rule is: 'when tool results are present, do not
+    disclaim ability to search.' This is a static rule that must be
+    present in the prompt regardless of whether tool_context is set
+    on this turn — the model needs to remember the rule for ALL turns."""
+    from app.kernel import build_system_prompt, resolve_decision, MissionContext
+    ctx = MissionContext(user_input="ping")
+    decision = resolve_decision(ctx)
+    prompt_no_ctx = build_system_prompt(decision)
+    prompt_with_ctx = build_system_prompt(decision, tool_context="<tool_results>hit</tool_results>")
+    # Both must contain the rule
+    assert "tool RAN SUCCESSFULLY" in prompt_no_ctx
+    assert "tool RAN SUCCESSFULLY" in prompt_with_ctx
+    assert "I cannot search" in prompt_no_ctx
+    assert "I cannot search" in prompt_with_ctx

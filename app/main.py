@@ -695,9 +695,9 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
         else:
             yield _sse(brain_client.brain_sse.disabled())
         yield _sse({"type": "decision", "request_id": mission.request_id, "decision": decision_result.to_dict()})
-        # P0: emit a tools_used event BEFORE per-tool events so the UI topbar
-        # can display which tools actually fired on this turn. Empty list =
-        # no tool was needed (general-knowledge answer).
+        # P0: emit a tools_used event BEFORE per-tool events (and BEFORE the
+        # brain/local branch) so the UI topbar always sees which tools ran
+        # on this turn, regardless of who ends up producing the LLM reply.
         tools_used = []
         if search_query: tools_used.append("web_search")
         if repository: tools_used.append(f"github_{github_mode}")
