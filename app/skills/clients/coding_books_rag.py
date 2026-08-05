@@ -20,10 +20,6 @@ from typing import Any
 logger = logging.getLogger("aion.skills.coding_books_rag")
 
 COLLECTION = "coding_books"
-CATALOG_NAMES = (
-    "coding_books_catalog.json",
-    "books/coding_books_catalog.json",
-)
 
 
 def _data_roots() -> list[Path]:
@@ -61,14 +57,12 @@ def resolve_catalog_path(explicit: str | None = None) -> Path:
         if not p.is_file():
             raise FileNotFoundError(f"catalog not found: {p}")
         return p
+    # Try every root in priority order, with both layout shapes
+    # (catalog at root OR catalog under root/books/).
     for root in _data_roots():
-        for name in CATALOG_NAMES:
-            cand = root / name if not name.startswith("books/") else root.parent / name if root.name == "books" else root / name
-            # simpler: try root / name for both patterns
-        for name in ("coding_books_catalog.json",):
-            cand = root / name
-            if cand.is_file():
-                return cand
+        cand = root / "coding_books_catalog.json"
+        if cand.is_file():
+            return cand
         cand = root / "books" / "coding_books_catalog.json"
         if cand.is_file():
             return cand

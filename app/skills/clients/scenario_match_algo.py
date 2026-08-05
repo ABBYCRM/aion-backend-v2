@@ -239,7 +239,7 @@ def match(
     store: Optional[ScenarioStore] = None,
     config: Optional[MatchConfig] = None,
 ) -> Dict[str, Any]:
-    """Alias for match_scenarios; v1-shape adds  and ."""
+    """Alias for match_scenarios; v1-shape adds `count` and `chosen` keys on top of the v2 result so existing callers/tests do not break."""
     out = match_scenarios(
         trigger,
         pack=pack,
