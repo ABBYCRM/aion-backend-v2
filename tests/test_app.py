@@ -404,7 +404,7 @@ def test_skills_bootstrap_seeds_12_contracts():
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 12
+    assert info.get("seeded") == 14
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -607,12 +607,13 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 12
+    assert body.get("count") >= 14
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
     assert "scrape.url" in ids
     assert "email.send" in ids
+    assert "github.scenario.match" in ids
 
 
 def test_skill_routes_run_skills_catalog():
@@ -627,7 +628,7 @@ def test_skill_routes_run_skills_catalog():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body["data"]["count"] >= 12
+    assert body["data"]["count"] >= 14
 
 
 def test_skill_routes_run_unknown_skill_returns_404():
@@ -678,14 +679,125 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 12
+    assert body.get("seeded") == 14
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
+    assert "github.scenario.match" in body.get("skills", [])
     # Sanity: registry has it now
     assert get_registry().get("web.search") is not None
-    # Idempotent: running again re-seeds (12 again)
+    # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 12
+    assert r2.json().get("seeded") == 14
+
+
+
+
+def test_scenario_bootstrap_seeds_14_contracts():
+    """After installing the GitHub scenarios CSV, the catalog must
+    include github.scenario.match and github.scenario.index."""
+    from app.skills import bootstrap
+    info = bootstrap()
+    assert info.get("seeded") == 14
+    from app.skills.registry_core import get_registry
+    ids = {s.id for s in get_registry().list(enabled_only=False)}
+    assert "github.scenario.match" in ids
+    assert "github.scenario.index" in ids
+
+
+def test_scenario_match_returns_ranked_rows():
+    """Trigger a known token in the seeded CSV; the matcher must return
+    a non-empty list, sorted by score desc, with the best match in chosen."""
+    import os, tempfile
+    tmp = tempfile.mkdtemp()
+    csv_path = os.path.join(tmp, "github_scenarios.csv")
+    # Write a small controlled CSV for deterministic match
+    import csv as _csv
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
+        w.writeheader()
+        w.writerow({"id":"GH-0001","category":"actions_run","trigger":"workflow run is cancelled by user","condition":"workflow.elapsed_seconds < 60","if_action":"emit workflow_cancelled event; release concurrency","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
+        w.writerow({"id":"GH-0002","category":"api","trigger":"x-ratelimit-remaining drops below threshold","condition":"request.method == 'GET'","if_action":"backoff per Retry-After","else_action":"halt API activity","severity":"medium","source_doc":"docs.github.com/rest"})
+        w.writerow({"id":"GH-0003","category":"secrets","trigger":"workflow triggered from a fork tries to read a repo secret","condition":"secrets.MY_SECRET exists at repo level","if_action":"use GITHUB_TOKEN (read-only)","else_action":"block workflow","severity":"critical","source_doc":"docs.github.com/secrets"})
+    from app.skills.clients import github_scenarios as ghs
+    out = ghs.match_scenarios("workflow is cancelled", csv_path=csv_path, limit=3)
+    assert out["count"] >= 1
+    assert out["chosen"] is not None
+    assert out["chosen"]["id"] == "GH-0001"
+    # sorted desc
+    scores = [m["score"] for m in out["matches"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_scenario_match_returns_empty_when_no_token_overlap():
+    """A trigger with zero token overlap must return matches=[] with a
+    clear reason (not invent a row)."""
+    import os, tempfile, csv as _csv
+    tmp = tempfile.mkdtemp()
+    csv_path = os.path.join(tmp, "github_scenarios.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
+        w.writeheader()
+        w.writerow({"id":"GH-100","category":"actions_run","trigger":"workflow run is cancelled","condition":"x","if_action":"y","else_action":"z","severity":"high","source_doc":"docs"})
+    from app.skills.clients import github_scenarios as ghs
+    out = ghs.match_scenarios("xyzzy plumbus", csv_path=csv_path, limit=3)
+    assert out["count"] == 0
+    assert out["matches"] == []
+    assert out["chosen"] is None
+    assert "0 rows" in out["reason"]
+
+
+def test_scenario_match_missing_trigger_returns_invalid_args():
+    from app.skills.clients import github_scenarios as ghs
+    from app.skills.base import SkillError
+    try:
+        ghs.match_scenarios("", csv_path="/nonexistent")
+        assert False, "expected SkillError"
+    except SkillError as e:
+        assert e.error_code == "invalid_args"
+        assert "trigger" in str(e)
+
+
+def test_scenario_match_missing_csv_returns_load_failed():
+    from app.skills.clients import github_scenarios as ghs
+    from app.skills.base import SkillError
+    try:
+        ghs.match_scenarios("anything", csv_path="/nonexistent/path.csv")
+        assert False, "expected SkillError"
+    except SkillError as e:
+        assert e.error_code == "github_scenarios_load_failed"
+
+
+def test_scenario_skill_routes_returns_real_data():
+    """End-to-end: POST /api/skills/run github.scenario.match must
+    return ok=true with ranked matches from the seeded CSV."""
+    import os, csv as _csv
+    # Write a small test CSV in the data dir so the matcher can find it
+    csv_path = os.path.join(os.environ.get("AION_DATA_DIR", "/tmp/aion-test-data"), "github_scenarios.csv")
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=["id","category","trigger","condition","if_action","else_action","severity","source_doc"], quoting=_csv.QUOTE_ALL)
+        w.writeheader()
+        w.writerow({"id":"GH-0001","category":"actions_run","trigger":"actions_run workflow is cancelled by user","condition":"workflow.elapsed_seconds < 60","if_action":"emit workflow_cancelled event","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
+        w.writerow({"id":"GH-0002","category":"actions_run","trigger":"actions_run workflow is cancelled by API","condition":"workflow.conclusion == 'cancelled'","if_action":"emit workflow_cancelled event","else_action":"page on-call","severity":"high","source_doc":"docs.github.com/actions"})
+    from app.skills import bootstrap
+    from app import main as main_mod
+    import importlib
+    importlib.reload(main_mod)
+    bootstrap()
+    from fastapi.testclient import TestClient
+    client = TestClient(main_mod.app)
+    r = client.post(
+        "/api/skills/run",
+        headers=USER_HEADERS,
+        json={"skill_id": "github.scenario.match", "args": {"trigger": "actions_run workflow cancelled"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True, f"expected ok, got {body}"
+    assert body["data"]["count"] >= 1
+    assert body["data"]["chosen"] is not None
+    m = body["data"]["matches"][0]
+    assert {"id", "category", "trigger", "condition", "if_action", "else_action", "severity", "source_doc", "score"}.issubset(m.keys())
 
 
 # ---------------------------------------------------------------------------

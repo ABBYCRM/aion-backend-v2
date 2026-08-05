@@ -133,10 +133,49 @@ def all_specs() -> list[SkillSpec]:
             tags=["meta"],
             error_codes=[],
         ),
+        SkillSpec(
+            id="github.scenario.match",
+            name="GitHub scenario match",
+            description="Lookup the policy CSV for the trigger that just happened. Returns ranked matches from $AION_DATA_DIR/github_scenarios.csv with if_action / else_action / severity / source_doc. Never invents a row.",
+            side_effect="read",
+            input_schema={
+                "type": "object",
+                "required": ["trigger"],
+                "properties": {
+                    "trigger": {"type": "string"},
+                    "condition": {"type": "string"},
+                    "category": {"type": "string"},
+                    "context": {"type": "object"},
+                    "csv_path": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+            executor="builtin:github.scenario.match",
+            tags=["github", "policy", "read"],
+            error_codes=[
+                "github_scenarios_load_failed",
+                "github_scenarios_empty",
+                "invalid_args",
+            ],
+        ),
+        SkillSpec(
+            id="github.scenario.index",
+            name="GitHub scenario index",
+            description="Subroutine: index the policy CSV into the local RAG 'github_policy' collection so rag.skills.search can find scenarios by natural language.",
+            side_effect="write",
+            input_schema={
+                "type": "object",
+                "properties": {"csv_path": {"type": "string"}},
+            },
+            executor="builtin:github.scenario.index",
+            tags=["github", "policy", "rag"],
+            error_codes=["github_scenarios_load_failed", "github_scenarios_empty"],
+        ),
     ]
 
 
 def wire_executors() -> None:
+    from .clients import github_scenarios as ghs
     r = get_runner()
     r.register_many(
         {
@@ -152,6 +191,8 @@ def wire_executors() -> None:
             "builtin:rag.upsert": rag.rag_upsert,
             "builtin:rag.index_catalog": rag.rag_index_skill_catalog,
             "builtin:skills.catalog": _catalog,
+            "builtin:github.scenario.match": ghs.github_scenario_match,
+            "builtin:github.scenario.index": ghs.github_scenario_index,
         }
     )
 
