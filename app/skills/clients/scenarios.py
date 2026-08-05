@@ -24,7 +24,8 @@ from typing import Any
 from .scenario_match_algo import match_scenarios as _v2_match_scenarios
 
 
-def _to_v1_shape(v2: dict[str, Any]) -> dict[str, Any]:
+def _to_v1_shape(v2: dict[str, Any], *, query: dict[str, Any] | None = None) -> dict[str, Any]:
+    _v1_query = query or {}
     """Translate the operator's v2 result into the v1 result shape
     the existing 20 contracts + DEFER gate + tests expect."""
     matches_v2 = v2.get("matches") or []
@@ -53,9 +54,14 @@ def _to_v1_shape(v2: dict[str, Any]) -> dict[str, Any]:
         matches_v1.append(out)
     chosen = matches_v1[0] if matches_v1 else None
     stats = v2.get("stats") or {}
+    # echo back the trigger that was actually matched (the v2 algo
+    # doesn't return it directly; we get it from the call site via
+    # the function arg).
     return {
-        "query": {"trigger": v2.get("query", {}).get("trigger", ""),
-                  "condition": None, "category": None, "pack": stats.get("pack", "all")},
+        "query": {"trigger": _v1_query.get("trigger", ""),
+                  "condition": _v1_query.get("condition"),
+                  "category": _v1_query.get("category"),
+                  "pack": stats.get("pack", "all")},
         "count": len(matches_v1),
         "matches": matches_v1,
         "chosen": chosen,
@@ -104,7 +110,14 @@ def match_scenarios(
         limit=limit,
         min_score=min_score,
     )
-    return _to_v1_shape(v2)
+    return _to_v1_shape(
+        v2,
+        query={
+            "trigger": trigger,
+            "condition": condition,
+            "category": category,
+        },
+    )
 
 
 # ===========================================================================
