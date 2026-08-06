@@ -186,6 +186,18 @@ Output style (technical content):
 - Avoid hedging, filler phrases ("it is important to note that",
   "in conclusion", "delve into"), and synonym variation for the
   same concept. Prefer the simplest accurate word.
+- Preferred terms (general technical English; not for legal/military
+  text where the long form is the controlled vocabulary): start (not
+  commence/initiate), use (not utilize/leverage), help (not
+  facilitate/assist), improve (not optimize/enhance), make sure (not
+  ensure), check (not verify), find (not determine), get (not
+  obtain), give (not provide), need (not require), try (not
+  endeavor/attempt), about (not with regard to / in regards to),
+  if (not in the event that), because (not due to the fact that),
+  many (not a large number of), now (not at this point in time),
+  quickly (not in a timely manner), regularly (not on a regular
+  basis), soon (not in the near future). Do NOT use these preferred
+  terms in user-supplied text that is being quoted or rewritten.
 
 {contexts}
 """.strip()

@@ -113,7 +113,15 @@ class SkillRegistry:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL;")
+        # WAL mode is preferred for concurrent readers/writers, but it
+        # requires a filesystem that supports shared memory mappings
+        # (some FUSE, NFS, and read-only sandbox volumes reject it
+        # with "disk I/O error"). Fall back to DELETE mode silently
+        # rather than crashing on first startup.
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError:
+            self._conn.execute("PRAGMA journal_mode=DELETE;")
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS skills (

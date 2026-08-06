@@ -3432,6 +3432,33 @@ def test_ste_rewrite_normalizes_procedure_to_imperative():
     # The "You should" prefix should be normalized
     assert not text.startswith("You should")
 
+def test_ste_rewrite_does_not_apply_synonym_dictionary_to_input():
+    """Architectural lock: the rewrite skill is structural, not
+    vocabulary. It must NOT replace 'commence' with 'start' or
+    'utilize' with 'use' in user-supplied text. Those long forms
+    are correct in legal, military, and engineering contexts. The
+    preferred-term guidance lives in the kernel system prompt so
+    the LLM picks the short word when WRITING new text, not when
+    the rewrite tool is called on someone else's text.
+    """
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    # Legal / contract text — the long form is the controlled vocabulary.
+    text = (
+        "The Tenant shall commence the lease on January 1. The Landlord may utilize "
+        "the premises for storage. The Tenant must obtain insurance before taking possession. "
+        "The parties endeavor to resolve disputes amicably."
+    )
+    r = asyncio.run(writing_ste_rewrite({"text": text, "mode": "description"}, {}))
+    assert r["ok"] is True
+    rewritten = r["rewritten"]
+    # The controlled-vocabulary words must survive intact.
+    assert "commence" in rewritten, f"legal term 'commence' was replaced: {rewritten!r}"
+    assert "utilize" in rewritten, f"engineering term 'utilize' was replaced: {rewritten!r}"
+    assert "obtain" in rewritten, f"legal term 'obtain' was replaced: {rewritten!r}"
+    assert "endeavor" in rewritten, f"legal term 'endeavor' was replaced: {rewritten!r}"
+
+
 def test_ste_rewrite_procedure_short_when_already_concise():
     """procedure mode: already-concise text passes through (no spurious changes)."""
     import asyncio
@@ -3543,7 +3570,10 @@ def test_ste_rewrite_runs_via_skills_run_api(_vault_db, monkeypatch):
 
 def test_kernel_prompt_includes_ste_style_block():
     """build_system_prompt must include the Output style (technical
-    content) baseline block so every reply inherits the STE rules."""
+    content) baseline block so every reply inherits the STE rules
+    (active voice, no hedging, no synonym variation) AND the
+    preferred-terms guidance (start not commence, use not utilize,
+    etc.) so the LLM picks the short word by default."""
     from app.kernel import build_system_prompt, Decision, LawCheck
     from app.kernel import DecisionState
     decision = Decision(
@@ -3555,3 +3585,13 @@ def test_kernel_prompt_includes_ste_style_block():
     assert "active voice" in prompt
     assert "hedging" in prompt
     assert "synonym variation" in prompt
+    # Preferred-terms guidance: the kernel must give the LLM the
+    # short-form vocabulary. Verify a sample of the high-leverage
+    # pairs from the operator's spec.
+    assert "start" in prompt and "commence" in prompt
+    assert "use" in prompt and "utilize" in prompt
+    assert "help" in prompt and "facilitate" in prompt
+    assert "improve" in prompt and "optimize" in prompt
+    assert "make sure" in prompt and "ensure" in prompt
+    # The carve-out: do not rewrite user-quoted text.
+    assert "user-supplied text" in prompt or "quoted" in prompt
