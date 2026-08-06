@@ -400,12 +400,12 @@ def test_policy_github_check_routes_allowlist_decision(monkeypatch):
 # Skill registry full pack (12 contracts, RAG, GitHub, scrape, email)
 # ===========================================================================
 
-def test_skills_bootstrap_seeds_37_contracts():
+def test_skills_bootstrap_seeds_38_contracts():
     """bootstrap() must populate all 12 built-in skills into the SQLite DB."""
     from app.skills import bootstrap
     from app.skills.registry_core import get_registry
     info = bootstrap()
-    assert info.get("seeded") == 37
+    assert info.get("seeded") == 38
     reg = get_registry()
     ids = {s.id for s in reg.list(enabled_only=False)}
     # Network skills
@@ -500,7 +500,7 @@ def test_skill_runner_executes_wired_builtin():
     assert result.ok is True
     assert result.skill_id == "skills.catalog"
     assert "count" in result.data
-    assert result.data["count"] >= 37
+    assert result.data["count"] >= 38
     assert result.run_id is not None
     assert result.run_id.startswith("run_")
 
@@ -608,7 +608,7 @@ def test_skill_routes_catalog_endpoint_returns_12():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("count") >= 37
+    assert body.get("count") >= 38
     ids = {s["id"] for s in body["skills"]}
     assert "github.repo" in ids
     assert "rag.skills.search" in ids
@@ -680,7 +680,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("seeded") == 37
+    assert body.get("seeded") == 38
     assert "web.search" in body.get("skills", [])
     assert "rag.skills.search" in body.get("skills", [])
     assert "github.scenario.match" in body.get("skills", [])
@@ -688,7 +688,7 @@ def test_skill_routes_bootstrap_endpoint_runs_seed():
     assert get_registry().get("web.search") is not None
     # Idempotent: running again re-seeds (14 again)
     r2 = client.post("/api/skills/bootstrap", headers=USER_HEADERS)
-    assert r2.json().get("seeded") == 37
+    assert r2.json().get("seeded") == 38
 
 
 
@@ -698,7 +698,7 @@ def test_scenario_bootstrap_seeds_37_contracts():
     include github.scenario.match and github.scenario.index."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 37
+    assert info.get("seeded") == 38
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "github.scenario.match" in ids
@@ -1174,7 +1174,7 @@ def test_aion_stack_skill_routes_37_contracts():
     """Bootstrap must seed 25 contracts (was 23, +aion_stack.scenario.match +stack.policy.match)."""
     from app.skills import bootstrap
     info = bootstrap()
-    assert info.get("seeded") == 37
+    assert info.get("seeded") == 38
     from app.skills.registry_core import get_registry
     ids = {s.id for s in get_registry().list(enabled_only=False)}
     assert "aion_stack.scenario.match" in ids
@@ -3329,3 +3329,229 @@ def test_brave_as_context_includes_provider_and_score(monkeypatch):
     assert "Extras: more" in ctx
     assert "Match: A query here" in ctx
     assert "URL: https://a" in ctx
+
+
+# =============================================================================
+# STE (ASD-STE100) technical English rewrite skill — locked tests
+# =============================================================================
+
+def test_ste_rewrite_drops_hedging_filler():
+    """R1: 'It is important to note that ...' must be dropped."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "It is important to note that the system processes data.", "mode": "description"},
+        {},
+    ))
+    assert r["ok"] is True
+    assert "It is important to note" not in r["rewritten"]
+    assert any(c["rule"] == "R1" for c in r["changes"])
+
+def test_ste_rewrite_drops_meta_references():
+    """R2: 'In conclusion', 'To summarize', 'As mentioned earlier' must be dropped."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    for phrase in ["In conclusion,", "To summarize,", "As mentioned earlier,"]:
+        r = asyncio.run(writing_ste_rewrite(
+            {"text": f"{phrase} the system is fast.", "mode": "description"},
+            {},
+        ))
+        assert r["ok"] is True
+        assert phrase.rstrip(",") not in r["rewritten"]
+
+def test_ste_rewrite_collapses_stacked_synonyms():
+    """R3: 'each and every', 'in order to', 'due to the fact that' collapse."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "You must complete each and every task in order to finish.", "mode": "procedure"},
+        {},
+    ))
+    assert r["ok"] is True
+    assert "each and every" not in r["rewritten"]
+    assert "in order to" not in r["rewritten"]
+    assert "each" in r["rewritten"].lower()
+    assert "to" in r["rewritten"].lower().split()  # 'in order to' -> 'to'
+
+def test_ste_rewrite_drops_empty_intensifiers():
+    """R4: 'very', 'really', 'quite', 'basically' must be dropped."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "This is very important and really quite significant.", "mode": "description"},
+        {},
+    ))
+    assert r["ok"] is True
+    assert "very" not in r["rewritten"].lower().split()
+    assert "really" not in r["rewritten"].lower().split()
+    assert "quite" not in r["rewritten"].lower().split()
+
+def test_ste_rewrite_removes_ai_slop_phrases():
+    """S4: 'delve into', 'in the realm of', 'tapestry of', 'myriad of'."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "We delve into a tapestry of ideas in the realm of distributed systems.", "mode": "description"},
+        {},
+    ))
+    assert r["ok"] is True
+    text = r["rewritten"].lower()
+    assert "delve" not in text
+    assert "tapestry" not in text
+    assert "in the realm of" not in text
+
+def test_ste_rewrite_enforces_procedure_length_cap():
+    """procedure mode: max 20 words per step. Long sentences get split."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    long = (
+        "First, open the file, then read the contents carefully and make sure you "
+        "understand every line so that you can continue with confidence, and after "
+        "that you should save the file again before you close the editor."
+    )
+    r = asyncio.run(writing_ste_rewrite({"text": long, "mode": "procedure"}, {}))
+    assert r["ok"] is True
+    # The result must have at least one split (R5 change)
+    assert any(c["rule"] == "R5" for c in r["changes"]), f"no split recorded: {r['changes']}"
+    # Each remaining sentence must be under the cap
+    import re as _re
+    for sent in _re.split(r"(?<=[.!?])\s+", r["rewritten"]):
+        wc = len(_re.findall(r"\S+", sent))
+        assert wc <= 20, f"sentence {wc} words > cap 20: {sent!r}"
+
+def test_ste_rewrite_normalizes_procedure_to_imperative():
+    """procedure mode: 'You should <verb>' -> '<Verb>...' (drop redundant 'you should')."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "You should click Save and then close the window.", "mode": "procedure"},
+        {},
+    ))
+    assert r["ok"] is True
+    text = r["rewritten"]
+    # The "You should" prefix should be normalized
+    assert not text.startswith("You should")
+
+def test_ste_rewrite_procedure_short_when_already_concise():
+    """procedure mode: already-concise text passes through (no spurious changes)."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "Click Save. Close the window.", "mode": "procedure"},
+        {},
+    ))
+    assert r["ok"] is True
+    # The join_sentences helper normalizes whitespace + trailing
+    # periods. The semantic content is unchanged.
+    assert "Click Save." in r["rewritten"]
+    assert "Close the window." in r["rewritten"]
+    assert r["changes"] == []
+    assert r["new_word_count"] == 5  # "Click Save. Close the window." -> 5 words
+
+def test_ste_rewrite_rejects_empty_text():
+    """Invalid args: text must be non-empty."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite({"text": "", "mode": "description"}, {}))
+    assert r["ok"] is False
+    assert r["error_code"] == "invalid_args"
+
+def test_ste_rewrite_rejects_invalid_mode():
+    """Invalid mode: must be one of procedure/description/status/general."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "Some text.", "mode": "marketing-copy"},
+        {},
+    ))
+    assert r["ok"] is False
+    assert r["error_code"] == "invalid_mode"
+
+def test_ste_rewrite_rejects_text_over_50k():
+    """Cap at 50k chars to keep the skill cheap to invoke."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "x" * 50_001, "mode": "description"},
+        {},
+    ))
+    assert r["ok"] is False
+    assert r["error_code"] == "text_too_long"
+
+def test_ste_rewrite_returns_useful_metadata():
+    """The response must include original_word_count, new_word_count,
+    word_reduction, and a list of changes (or empty)."""
+    import asyncio
+    from app.skills.clients.ste_rewrite import writing_ste_rewrite
+    r = asyncio.run(writing_ste_rewrite(
+        {"text": "It is important to note that the system is very fast.", "mode": "description"},
+        {},
+    ))
+    assert r["ok"] is True
+    assert "original_word_count" in r
+    assert "new_word_count" in r
+    assert "word_reduction" in r
+    assert "changes" in r
+    assert r["original_word_count"] > r["new_word_count"]
+    assert r["word_reduction"] == r["original_word_count"] - r["new_word_count"]
+
+def test_ste_rewrite_registered_as_skill():
+    """The writing.ste.rewrite skill must be in the seeded registry."""
+    from app.skills.registry_core import get_registry
+    reg = get_registry()
+    # Force a seed
+    from app.skills import seed_all
+    seed_all.wire_executors()
+    seed_all.all_specs()
+    # Re-fetch registry after seed
+    import importlib
+    importlib.reload(seed_all)
+    # The skill spec must be in the database after the lifespan
+    # ran, but for the test we just check the seed list.
+    specs = seed_all.all_specs()
+    ste = [s for s in specs if s.id == "writing.ste.rewrite"]
+    assert len(ste) == 1
+    assert ste[0].side_effect == "none"
+    assert "text" in ste[0].input_schema["required"]
+
+def test_ste_rewrite_runs_via_skills_run_api(_vault_db, monkeypatch):
+    """End-to-end: POST /api/skills/run with skill_id=writing.ste.rewrite
+    must work and return the rewritten text. This is the operator's
+    primary entry point."""
+    from fastapi.testclient import TestClient
+    from app import main as main_mod
+    client = TestClient(main_mod.app)
+    r = client.post(
+        "/api/skills/run",
+        headers=USER_HEADERS,
+        json={
+            "skill_id": "writing.ste.rewrite",
+            "args": {
+                "text": "It is important to note that the system is very fast and really quite good.",
+                "mode": "description",
+            },
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    data = body.get("data", {})
+    assert data.get("ok") is True
+    text = data.get("rewritten", "").lower()
+    assert "very" not in text.split()
+    assert "really" not in text.split()
+    assert "it is important to note" not in text
+
+def test_kernel_prompt_includes_ste_style_block():
+    """build_system_prompt must include the Output style (technical
+    content) baseline block so every reply inherits the STE rules."""
+    from app.kernel import build_system_prompt, Decision, LawCheck
+    from app.kernel import DecisionState
+    decision = Decision(
+        state=DecisionState.COMMIT, score=0.9, rationale="test",
+        checks=[LawCheck(law="REALITY", passed=True, note="test")],
+    )
+    prompt = build_system_prompt(decision)
+    assert "Output style" in prompt
+    assert "active voice" in prompt
+    assert "hedging" in prompt
+    assert "synonym variation" in prompt

@@ -181,5 +181,11 @@ Rules:
 - If a tool RAN SUCCESSFULLY and produced results (search hits, repo metadata, file contents, scrapes, etc.), you MUST treat those results as the authoritative answer to the user's question. Do NOT preface the answer with disclaimer theater such as "I cannot search GitHub/LinkedIn/X" when the tool already returned real data. Cite the tool result markers ([1], [2], … for web_search; repository name + path for github.file; issue numbers for github.issues; the URL itself for scrape). If the tool returned zero hits, say "no public results" and stop. If the tool returned hits, lead with the hits, not with a disclaimer.
 - Give a direct useful answer; decision metadata may be shown separately by the UI.
 
+Output style (technical content):
+- Prefer active voice. One main claim or instruction per sentence.
+- Avoid hedging, filler phrases ("it is important to note that",
+  "in conclusion", "delve into"), and synonym variation for the
+  same concept. Prefer the simplest accurate word.
+
 {contexts}
 """.strip()

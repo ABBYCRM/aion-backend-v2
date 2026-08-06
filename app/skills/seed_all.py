@@ -98,6 +98,27 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "properties": {}},
             executor="builtin:skills.catalog", tags=["meta"],
             error_codes=[]),
+        # ---- STE (ASD-STE100) technical English rewrite ----
+        # Pure deterministic text transformation. No LLM, no network.
+        # Rewrites tool descriptions, status reports, and agent-to-agent
+        # messages for clarity. See app/skills/clients/ste_rewrite.py
+        # for the rules + slop patterns. The mode enum matches the
+        # STE100 categories: procedure (imperative, ≤20 words/step),
+        # description (declarative, ≤25 words/sentence), status
+        # (present-tense, no speculation), general (≤25 words/sentence).
+        SkillSpec(id="writing.ste.rewrite", name="STE rewrite",
+            description="Rewrite text into clear, concise technical English using ASD-STE100 principles. Removes hedging, filler, synonym stacking, and AI-slop phrases. Mode-aware: procedure / description / status / general. No LLM, no network, deterministic.",
+            side_effect="none",
+            input_schema={
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": {"type": "string", "minLength": 1, "maxLength": 50000},
+                    "mode": {"type": "string", "enum": ["procedure", "description", "status", "general"]},
+                },
+            },
+            executor="builtin:writing.ste.rewrite", tags=["writing", "ste", "clarity", "read"],
+            error_codes=["invalid_args", "invalid_mode", "text_too_long"]),
         # ---- 5 scenario matchers + 1 unified + 1 index = 7 new + 1 legacy = 8 ----
         SkillSpec(id="github.scenario.match", name="GitHub scenario match",
             description="Lookup the GitHub policy CSV. 500 rows grounded in 20+ GitHub docs pages (actions, secrets, API, webhooks, branch, Dependabot, Pages, etc.). Returns ranked matches with if_action / else_action / severity / source_doc. Never invents a row.",
@@ -308,9 +329,11 @@ def wire_executors() -> None:
     from .clients import coding_tasks_corpus as ctc
     from .clients import extra_scenarios as exs
     from .clients import syntax as syn
+    from .clients import ste_rewrite as ste
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
+        "builtin:writing.ste.rewrite": ste.writing_ste_rewrite,
         "builtin:github.repo": gh.github_repo,
         "builtin:github.file": gh.github_file,
         "builtin:github.issues": gh.github_issues,
