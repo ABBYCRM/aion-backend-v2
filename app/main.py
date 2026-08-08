@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from .audit import audit
 from .auth import Principal, require_admin, require_principal
 from .kernel import AION_CONTINUITY_PACK, MissionContext, build_system_prompt, resolve_decision
-from .llm import AllProvidersFailed, InvalidModelSelection, configured_providers, list_models, probe, resolve_model_chain, stream_chat
+from .llm import AllProvidersFailed, InvalidModelSelection, complete_chat, configured_providers, list_models, probe, resolve_model_chain, stream_chat
+from . import reflector
 from .notes import SecretLikeValue, notes
 from .rate_limit import _ChatCapacityExhausted, enforce_rate_limit, limiter
 from .settings import settings
@@ -1190,14 +1191,94 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                 else:
                     brain_messages.append({"role": role, "content": content})
             try:
+                # Buffer the Brain stream so the answer mirror can audit
+                # the answer after the user-visible response has been
+                # delivered. Same contract as the local LLM path below.
+                _brain_mirror_buffer: list[str] = []
+                _brain_mirror_provider: str = ""
+                _brain_mirror_model: str = ""
                 async with limiter.chat_slot():
                     async for evt in brain_client.stream_chat(messages=brain_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
-                        if evt.get("type") == "[DONE]":
+                        evt_type = evt.get("type")
+                        if evt_type == "open":
+                            _brain_mirror_provider = evt.get("provider", "")
+                            _brain_mirror_model = evt.get("model", "")
+                        elif evt_type == "delta":
+                            text_chunk = evt.get("text", "")
+                            if text_chunk:
+                                _brain_mirror_buffer.append(text_chunk)
+                        if evt_type == "[DONE]":
                             yield b"data: [DONE]\n\n"; return
                         # Forward all Brain SSE events unchanged. The
                         # frontend already understands the AION v2 contract.
                         yield _sse(evt); await asyncio.sleep(0)
                     yield b"data: [DONE]\n\n"
+                # Answer mirror against the Brain-streamed answer.
+                # Auditor is the local LLM chain (different provider than
+                # Brain's answer) so the audit is independent.
+                if _brain_mirror_buffer and reflector.mirror_enabled_from_settings(settings):
+                    try:
+                        _full_answer = "".join(_brain_mirror_buffer)
+                        _original_input_tokens = sum(reflector.estimate_tokens(m.get("content", "")) for m in brain_messages)
+                        async def _call_audit_brain(provider, model, messages, max_tokens, temperature):
+                            return await complete_chat(
+                                provider=provider, model=model, messages=messages,
+                                temperature=temperature, max_tokens=max_tokens,
+                                request_id=f"brain-mirror-audit-{mission.request_id}",
+                            )
+                        async def _call_revision_brain(provider, model, messages, max_tokens, temperature):
+                            return await complete_chat(
+                                provider=provider, model=model, messages=messages,
+                                temperature=temperature, max_tokens=max_tokens,
+                                request_id=f"brain-mirror-revision-{mission.request_id}",
+                            )
+                        _mirror = await reflector.run_mirror(
+                            answer=_full_answer, user_request=user_text,
+                            answer_provider=_brain_mirror_provider, answer_model=_brain_mirror_model,
+                            original_input_tokens=_original_input_tokens,
+                            call_audit_fn=_call_audit_brain, call_revision_fn=_call_revision_brain,
+                            enabled=True,
+                        )
+                        audit.record("mirror.audited.brain", {
+                            "subject": principal.subject, "request_id": mission.request_id,
+                            "answer_model": f"{_brain_mirror_provider}/{_brain_mirror_model}",
+                            "auditor": f"{_mirror.auditor_provider}/{_mirror.auditor_model}",
+                            "resolved": _mirror.resolved, "passed": _mirror.passed,
+                            "attempts": _mirror.attempts, "tokens_added": _mirror.tokens_added,
+                            "user_knew_already": _mirror.user_knew_already,
+                            "latency_ms": _mirror.latency_ms,
+                            "last_audit": _mirror.audits[-1] if _mirror.audits else None,
+                        })
+                        # Emit the self_check event AFTER the [DONE] so
+                        # the frontend can update the message meta
+                        # without breaking the stream contract.
+                        _audit_payload = _mirror.audits[-1] if _mirror.audits else None
+                        yield _sse({
+                            "type": "self_check",
+                            "request_id": mission.request_id,
+                            "resolved": _mirror.resolved,
+                            "passed": _mirror.passed,
+                            "user_knew_already": _mirror.user_knew_already,
+                            "attempts": _mirror.attempts,
+                            "tokens_added": _mirror.tokens_added,
+                            "auditor": f"{_mirror.auditor_provider}/{_mirror.auditor_model}",
+                            "audit": {
+                                "value_added": _audit_payload.get("value_added") if _audit_payload else None,
+                                "grounded": _audit_payload.get("grounded") if _audit_payload else None,
+                                "honest": _audit_payload.get("honest") if _audit_payload else None,
+                                "novel": _audit_payload.get("novel") if _audit_payload else None,
+                                "missing_items": (_audit_payload.get("missing_items") if _audit_payload else [])[:5],
+                                "weak_items": (_audit_payload.get("weak_items") if _audit_payload else [])[:5],
+                            } if _audit_payload else None,
+                        })
+                        yield b"data: [DONE]\n\n"
+                    except Exception as exc:
+                        # Mirror failure must NEVER break the user-visible
+                        # response. The answer already streamed successfully.
+                        audit.record("mirror.failed.brain", {
+                            "subject": principal.subject, "request_id": mission.request_id,
+                            "error": str(exc)[:200],
+                        })
                 return
             except brain_client.BrainUnavailable as exc:
                 if settings.brain_required:
@@ -1215,12 +1296,91 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                 audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": "brain_bad_response"})
                 yield b"data: [DONE]\n\n"; return
         # Local LLM chain path (also used as fallback when Brain is down)
+        # Buffer the streamed answer text so the answer mirror can audit it
+        # after the user-visible response has been delivered.
+        _mirror_buffer: list[str] = []
+        _mirror_provider: str = ""
+        _mirror_model: str = ""
+        _mirror_resolved = False
         async with limiter.chat_slot():
             try:
                 async for event_type, payload in stream_chat(model_chain=model_chain, messages=model_messages, temperature=body.temperature, max_tokens=body.max_tokens, request_id=mission.request_id):
+                    if event_type == "open":
+                        _mirror_provider = payload.get("provider", "")
+                        _mirror_model = payload.get("model", "")
+                    elif event_type == "delta":
+                        text_chunk = payload.get("text", "")
+                        if text_chunk:
+                            _mirror_buffer.append(text_chunk)
                     yield _sse({"type": event_type, **payload}); await asyncio.sleep(0)
             except AllProvidersFailed as exc:
                 yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
+        # Answer mirror (opt-in via AION_REFLECTOR_ENABLED). Audits the just-
+        # streamed answer on 5 axes. If the audit fails, runs one silent
+        # repair pass and re-audits. Emits a self_check event so the UI
+        # can surface a "Self-check: weak" badge when both attempts fail.
+        if _mirror_buffer and reflector.mirror_enabled_from_settings(settings):
+            try:
+                _full_answer = "".join(_mirror_buffer)
+                _original_input_tokens = sum(reflector.estimate_tokens(m.get("content", "")) for m in model_messages)
+                async def _call_audit(provider, model, messages, max_tokens, temperature):
+                    return await complete_chat(
+                        provider=provider, model=model, messages=messages,
+                        temperature=temperature, max_tokens=max_tokens,
+                        request_id=f"mirror-audit-{mission.request_id}",
+                    )
+                async def _call_revision(provider, model, messages, max_tokens, temperature):
+                    return await complete_chat(
+                        provider=provider, model=model, messages=messages,
+                        temperature=temperature, max_tokens=max_tokens,
+                        request_id=f"mirror-revision-{mission.request_id}",
+                    )
+                _mirror = await reflector.run_mirror(
+                    answer=_full_answer, user_request=user_text,
+                    answer_provider=_mirror_provider, answer_model=_mirror_model,
+                    original_input_tokens=_original_input_tokens,
+                    call_audit_fn=_call_audit, call_revision_fn=_call_revision,
+                    enabled=True,
+                )
+                audit.record("mirror.audited", {
+                    "subject": principal.subject, "request_id": mission.request_id,
+                    "answer_model": f"{_mirror_provider}/{_mirror_model}",
+                    "auditor": f"{_mirror.auditor_provider}/{_mirror.auditor_model}",
+                    "resolved": _mirror.resolved, "passed": _mirror.passed,
+                    "attempts": _mirror.attempts, "tokens_added": _mirror.tokens_added,
+                    "user_knew_already": _mirror.user_knew_already,
+                    "latency_ms": _mirror.latency_ms,
+                    "last_audit": _mirror.audits[-1] if _mirror.audits else None,
+                })
+                # Always emit self_check if the audit ran. When the audit
+                # passes (no badge needed), the event is informational.
+                # When it fails twice, the UI shows the weak badge.
+                _audit_payload = _mirror.audits[-1] if _mirror.audits else None
+                yield _sse({
+                    "type": "self_check",
+                    "request_id": mission.request_id,
+                    "resolved": _mirror.resolved,
+                    "passed": _mirror.passed,
+                    "user_knew_already": _mirror.user_knew_already,
+                    "attempts": _mirror.attempts,
+                    "tokens_added": _mirror.tokens_added,
+                    "auditor": f"{_mirror.auditor_provider}/{_mirror.auditor_model}",
+                    "audit": {
+                        "value_added": _audit_payload.get("value_added") if _audit_payload else None,
+                        "grounded": _audit_payload.get("grounded") if _audit_payload else None,
+                        "honest": _audit_payload.get("honest") if _audit_payload else None,
+                        "novel": _audit_payload.get("novel") if _audit_payload else None,
+                        "missing_items": (_audit_payload.get("missing_items") if _audit_payload else [])[:5],
+                        "weak_items": (_audit_payload.get("weak_items") if _audit_payload else [])[:5],
+                    } if _audit_payload else None,
+                })
+            except Exception as exc:
+                # Mirror failure must NEVER break the user-visible response.
+                # The answer already streamed successfully. Just log it.
+                audit.record("mirror.failed", {
+                    "subject": principal.subject, "request_id": mission.request_id,
+                    "error": str(exc)[:200],
+                })
         yield b"data: [DONE]\n\n"
     stream_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value}
     if brain_probe_at_decision:

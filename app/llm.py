@@ -205,6 +205,32 @@ async def stream_chat(*, model_chain: list[ModelRef], messages: list[dict[str, A
     raise AllProvidersFailed(last_error)
 
 
+async def complete_chat(*, provider: str, model: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int, request_id: str = "mirror") -> tuple[str, int]:
+    """Non-streaming chat call. Returns (text, tokens_used). Used by the
+    answer mirror for short audit and revision calls."""
+    try:
+        client = _client_for(provider)
+    except ProviderUnavailable as exc:
+        raise AllProvidersFailed(str(exc)) from exc
+    started = time.monotonic()
+    try:
+        response = await client.chat.completions.create(
+            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens, stream=False,
+        )
+    except (AuthenticationError, RateLimitError, APIConnectionError, APIStatusError, BadRequestError) as exc:
+        audit.record("llm.attempt_failed", {"request_id": request_id, "provider": provider, "model": model, "error_type": type(exc).__name__})
+        raise AllProvidersFailed(_public_error(exc)) from exc
+    latency = int((time.monotonic() - started) * 1000)
+    text = ""
+    if response.choices:
+        text = getattr(response.choices[0].message, "content", "") or ""
+    tokens = 0
+    if getattr(response, "usage", None):
+        tokens = getattr(response.usage, "total_tokens", 0) or 0
+    audit.record("llm.attempt_ok", {"request_id": request_id, "provider": provider, "model": model, "latency_ms": latency, "completion_chars": len(text)})
+    return text, tokens
+
+
 def _error_kind(exc: Exception) -> str:
     if isinstance(exc, AuthenticationError): return "authentication"
     if isinstance(exc, RateLimitError): return "rate_limit"

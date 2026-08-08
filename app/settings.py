@@ -91,6 +91,9 @@ class Settings:
     brain_decision_only: bool
     brain_required: bool
     brain_state_check_on_startup: bool
+    # Reflector (answer mirror). Off by default — opt-in via settings.
+    reflector_enabled: bool
+    reflector_auditor_model: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -152,6 +155,8 @@ class Settings:
             brain_decision_only=_bool("AION_BRAIN_DECISION_ONLY", False),
             brain_required=_bool("AION_BRAIN_REQUIRED", False),
             brain_state_check_on_startup=_bool("AION_BRAIN_STATE_CHECK", True),
+            reflector_enabled=_bool("AION_REFLECTOR_ENABLED", False),
+            reflector_auditor_model=os.getenv("AION_REFLECTOR_AUDITOR_MODEL", "").strip(),
         )
 
     @property

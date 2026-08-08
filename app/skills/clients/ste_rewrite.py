@@ -335,15 +335,12 @@ def _normalize_for_procedure(text: str) -> str:
     Example: "You should click Save." -> "Click Save."
     Example: "First, you need to open the file." -> "Open the file first."
     """
-    # "You should <verb>..." -> "<Verb>..."
-    text = re.sub(
-        r"^You should\s+([a-z])",
-        lambda m: m.group(1).upper() + m.string[m.end():m.end() + 1000].split(".", 1)[0],
-        text,
-        flags=re.M,
-    )
+    # The regex engine substitutes the matched span with the return
+    # value, so the lambda only needs to return the verb (capitalized);
+    # the rest of the line is untouched.
+    text = re.sub(r"^You should\s+([a-z])", lambda m: m.group(1).upper(), text, flags=re.M)
     # "You need to <verb>..." -> "<Verb>..."
-    text = re.sub(r"^You need to\s+([a-z])", lambda m: m.group(1).upper() + m.string[m.end():], text, flags=re.M)
+    text = re.sub(r"^You need to\s+([a-z])", lambda m: m.group(1).upper(), text, flags=re.M)
     # "First, you <verb>..." -> "First, <verb>..." (drop redundant "you")
     text = re.sub(r"^(First|Then|Next|After that|Finally),?\s+you\s+", r"\1, ", text, flags=re.M | re.I)
     return text
