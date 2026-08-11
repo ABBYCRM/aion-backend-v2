@@ -153,7 +153,7 @@
     "category": "ai-coding-agents",
     "mcp": false,
     "primary_language": "rust",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "oraios/serena",
@@ -321,7 +321,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "microsoft/graphrag",
@@ -333,7 +333,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "OSU-NLP-Group/HippoRAG",
@@ -345,7 +345,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "VectifyAI/PageIndex",
@@ -357,7 +357,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "Cinnamon/kotaemon",
@@ -369,7 +369,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "Mintplex-Labs/anythingllm",
@@ -393,7 +393,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "langgenius/dify",
@@ -417,7 +417,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "NirDiamant/RAG_Techniques",
@@ -429,7 +429,7 @@
     "category": "rag-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "agentskills/agentskills",
@@ -597,7 +597,7 @@
     "category": "document-ingestion",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "microsoft/markitdown",
@@ -609,7 +609,7 @@
     "category": "document-ingestion",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "Unstructured-IO/unstructured",
@@ -621,7 +621,7 @@
     "category": "document-ingestion",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "modelcontextprotocol/servers",
@@ -669,7 +669,7 @@
     "category": "mcp",
     "mcp": true,
     "primary_language": "typescript",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "upstash/context7",
@@ -693,7 +693,7 @@
     "category": "mcp",
     "mcp": true,
     "primary_language": "rust",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "qdrant/qdrant",
@@ -705,7 +705,7 @@
     "category": "vector-databases",
     "mcp": false,
     "primary_language": "rust",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "chroma-core/chroma",
@@ -717,7 +717,7 @@
     "category": "vector-databases",
     "mcp": false,
     "primary_language": "rust+python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "milvus-io/milvus",
@@ -729,7 +729,7 @@
     "category": "vector-databases",
     "mcp": false,
     "primary_language": "go+cpp",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "lancedb/lancedb",
@@ -741,7 +741,7 @@
     "category": "vector-databases",
     "mcp": false,
     "primary_language": "rust",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "openai/openai-agents-python",
@@ -753,7 +753,7 @@
     "category": "agent-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "pydantic/pydantic-ai",
@@ -765,7 +765,7 @@
     "category": "agent-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "microsoft/agent-framework",
@@ -777,7 +777,7 @@
     "category": "agent-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "google/adk-python",
@@ -813,7 +813,7 @@
     "category": "agent-frameworks",
     "mcp": false,
     "primary_language": "typescript",
-    "in_gdy": false
+    "in_gdy": true
   },
   {
     "repo": "continuedev/continue",
@@ -852,6 +852,198 @@
     "mcp": false,
     "primary_language": "python",
     "warning": "maintenance-mode",
+    "in_gdy": false
+  },
+  {
+    "repo": "mem0ai/mem0",
+    "name": "Mem0",
+    "section": "Agent frameworks",
+    "best_for": "Long-term memory layer for LLM apps and agents \u2014 extraction, storage, retrieval, personalization",
+    "github": true,
+    "stars": "high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "letta-ai/letta",
+    "name": "Letta",
+    "section": "Agent frameworks",
+    "best_for": "Open-source framework for stateful agents with long-term memory, reasoning, tool execution",
+    "github": true,
+    "stars": "med",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "browser-use/browser-use",
+    "name": "Browser-Use",
+    "section": "Agent frameworks",
+    "best_for": "Browser automation library that lets agents drive a real browser with natural-language goals",
+    "github": true,
+    "stars": "high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "Skyvern-AI/skyvern",
+    "name": "Skyvern",
+    "section": "Agent frameworks",
+    "best_for": "Open-source browser automation using LLMs and computer vision to act on web workflows",
+    "github": true,
+    "stars": "med",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "OpenInterpreter/open-interpreter",
+    "name": "Open Interpreter",
+    "section": "AI coding agents",
+    "best_for": "Natural-language interface that runs code, controls the computer, and orchestrates tools locally",
+    "github": true,
+    "stars": "very-high",
+    "category": "ai-coding-agents",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "agno-agi/agno",
+    "name": "Agno",
+    "section": "Agent frameworks",
+    "best_for": "Lightweight Python framework for multi-modal agents, RAG, and reasoning",
+    "github": true,
+    "stars": "med",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "huggingface/smolagents",
+    "name": "smolagents",
+    "section": "Agent frameworks",
+    "best_for": "Hugging Face's minimal agent library \u2014 code-acting agents that write Python to solve tasks",
+    "github": true,
+    "stars": "high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "mendableai/firecrawl",
+    "name": "Firecrawl",
+    "section": "Agent frameworks",
+    "best_for": "API service that turns websites into clean Markdown / structured data for RAG and agents",
+    "github": true,
+    "stars": "very-high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "typescript",
+    "in_gdy": true
+  },
+  {
+    "repo": "unclecode/crawl4ai",
+    "name": "Crawl4AI",
+    "section": "Agent frameworks",
+    "best_for": "Open-source web crawler optimized for LLMs \u2014 Markdown output, schema extraction, fast",
+    "github": true,
+    "stars": "high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "langflow-ai/langflow",
+    "name": "Langflow",
+    "section": "RAG frameworks",
+    "best_for": "Visual IDE for building and shipping LLM apps, RAG, agents, and workflows",
+    "github": true,
+    "stars": "high",
+    "category": "rag-frameworks",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": true
+  },
+  {
+    "repo": "FlowiseAI/Flowise",
+    "name": "Flowise",
+    "section": "RAG frameworks",
+    "best_for": "Drag-and-drop UI to build LLM orchestration flows, agents, and chatbots",
+    "github": true,
+    "stars": "very-high",
+    "category": "rag-frameworks",
+    "mcp": false,
+    "primary_language": "typescript",
+    "in_gdy": true
+  },
+  {
+    "repo": "activepieces/activepieces",
+    "name": "Activepieces",
+    "section": "Agent frameworks",
+    "best_for": "Open-source no-code business automation with AI agents and 200+ integrations",
+    "github": true,
+    "stars": "med",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "typescript",
+    "in_gdy": true
+  },
+  {
+    "repo": "microsoft/semantic-kernel",
+    "name": "Semantic Kernel",
+    "section": "Agent frameworks",
+    "best_for": "Microsoft's SDK for integrating LLMs into .NET / Python apps with planners, memory, and skills",
+    "github": true,
+    "stars": "very-high",
+    "category": "agent-frameworks",
+    "mcp": false,
+    "primary_language": "csharp+python",
+    "in_gdy": true
+  },
+  {
+    "repo": "RooVetGit/Roo-Code",
+    "name": "Roo Code (RooVetGit fork)",
+    "section": "AI coding agents",
+    "best_for": "Active fork of Roo Code \u2014 AI coding assistant in VS Code with multi-mode agents",
+    "github": true,
+    "stars": "high",
+    "category": "ai-coding-agents",
+    "mcp": true,
+    "primary_language": "typescript",
+    "in_gdy": true
+  },
+  {
+    "repo": "Anil-matcha/Open-Generative-AI",
+    "name": "Open Generative AI",
+    "section": "Other notable",
+    "best_for": "Self-hostable interface bringing many image, video, lip-sync, and generative-media models into one app",
+    "github": true,
+    "stars": "high",
+    "category": "other",
+    "mcp": false,
+    "primary_language": "python",
+    "in_gdy": false
+  },
+  {
+    "repo": "every-app/open-seo",
+    "name": "OpenSEO",
+    "section": "Other notable",
+    "best_for": "Self-hosted SEO platform for keyword research, rankings, backlinks, audits, competitor analysis",
+    "github": true,
+    "stars": "low",
+    "category": "other",
+    "mcp": false,
+    "primary_language": "typescript",
     "in_gdy": false
   }
 ]
