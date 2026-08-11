@@ -317,6 +317,12 @@ if _META_CATALOG_PATH is None:
 if _META_CATALOG_PATH is None:
     # Fallback: assume CWD-relative
     _META_CATALOG_PATH = _Path("data/gdy_meta_catalog.json").resolve()
+
+# Debug log on import (visible in `doctl apps logs`).
+import logging as _logging
+_logging.getLogger(__name__).info(
+    "gdy.meta_catalog path=%s exists=%s", _META_CATALOG_PATH, _META_CATALOG_PATH.is_file()
+)
 _META_CATALOG_CACHE: list[dict] | None = None
 
 
