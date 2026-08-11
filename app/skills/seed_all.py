@@ -119,6 +119,72 @@ def all_specs() -> list[SkillSpec]:
             },
             executor="builtin:writing.ste.rewrite", tags=["writing", "ste", "clarity", "read"],
             error_codes=["invalid_args", "invalid_mode", "text_too_long"]),
+        # ---- No-AI-Slop merge: extra patterns folded into STE ----
+        # The 4 missing slop patterns that no-ai-slop catches and STE
+        # didn't (binary contrasts, throat-clearing, faux-insight,
+        # colon-reveals, importance-puffery). Mode-agnostic — fire
+        # before the STE R1-R7 rules so they never reach the LLM.
+        SkillSpec(id="writing.ste.slop_suppress", name="STE slop suppress",
+            description="Suppress 14 extra AI-slop patterns that the no-ai-slop skill catches and STE didn't originally cover: binary contrasts, throat-clearing openers, faux-insight setups, colon reveals, importance puffery, interpretive metadiscourse, weasel attribution, fake-strong verbs, synonym cycling, negative listing, dramatic fragmentation, robotic rhythm, rhetorical setups, faux-profound endings. Pure deterministic, no LLM, no network.",
+            side_effect="none",
+            input_schema={"type": "object", "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 50000}}},
+            executor="builtin:writing.ste.slop_suppress", tags=["writing", "ste", "slop", "clarity", "read"],
+            error_codes=["invalid_args"]),
+        # ---- I-Have-ADHD output style: action-first, numbered, restate-state ----
+        # Installed from github.com/ayghri/i-have-adhd. Aion applies this
+        # to its own chat replies so the user gets the first line as
+        # a concrete action they can run, multi-step work numbered,
+        # and state restated every turn. Adapts the ADHD-friendly rules
+        # to Aion's SSE stream — first chunk leads with the action.
+        SkillSpec(id="writing.adhd_output", name="ADHD-friendly output",
+            description="Shape a chat reply for a reader with ADHD: lead with the next concrete action, number multi-step work, restate state across turns, suppress tangents, give specific time estimates, make wins visible, end with ONE concrete next action in under two minutes. Pure transformation, no LLM, no network.",
+            side_effect="none",
+            input_schema={"type": "object", "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 50000}, "step": {"type": "string"}, "total_steps": {"type": "integer"}}},
+            executor="builtin:writing.adhd_output", tags=["writing", "style", "productivity", "read"],
+            error_codes=["invalid_args"]),
+        # ---- Book-to-Skill meta-skill: turn a PDF into an AION skill ----
+        # Installed from github.com/virgiliojr94/book-to-skill. Extracts
+        # frameworks + mental models + principles + techniques + anti-
+        # patterns from a technical PDF, then registers the result as
+        # a new AION skill. Pure orchestration: spawns the STE-rewriter
+        # for normalization, calls rag.upsert for chunk indexing, and
+        # writes a SKILL.md into data/skills/<slug>/SKILL.md.
+        SkillSpec(id="meta.book_to_skill", name="Book to skill",
+            description="Convert a technical PDF or Markdown file into an AION skill. Extracts the document's frameworks, mental models, principles, techniques, and anti-patterns, then registers the result as a new skill (SKILL.md + chunked RAG index). The agent gains long-term recall of the book's content. Pure AION orchestration, no external LLM, no GDY/NVIDIA dependency.",
+            side_effect="write",
+            input_schema={"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "slug": {"type": "string"}, "max_pages": {"type": "integer", "default": 600}}},
+            executor="builtin:meta.book_to_skill", tags=["meta", "ingest", "skill", "write"],
+            error_codes=["file_not_found", "pdf_parse_failed", "no_skill_extracted", "disk_write_failed"]),
+        # ---- GDY World: meta-catalog of 842 tools + 25 categories + search ----
+        # GDY (gdyworld.com) is a token-gated index of 800+ AI tools, OSINT
+        # databases, coding agents, RAG frameworks, and China-ecosystem
+        # sites. Wired here so when the user asks "is there an agent
+        # that does X" Aion searches GDY instead of hard-coding the
+        # answer. Auth via vault key GDY_API_KEY.
+        SkillSpec(id="gdy.me", name="GDY account info",
+            description="Return the GDY World account + scopes for this AION key. Use to verify GDY_API_KEY is configured and to see which scopes the token has (tools:read, categories:read, search, rag:context, rag:snapshot).",
+            side_effect="network",
+            input_schema={"type": "object", "properties": {}},
+            executor="builtin:gdy.me", tags=["gdy", "meta", "read"],
+            error_codes=["gdy_auth", "gdy_network", "gdy_upstream"]),
+        SkillSpec(id="gdy.categories", name="GDY categories",
+            description="List all 25 GDY categories with tool counts. Categories include 'AI / Coding Agents' (27 tools), 'AI / Agent Frameworks / Automation' (45), 'AI / Coding Agents' (27), 'AI Security / Agent Security / LLM Testing' (33), 'GEO / AEO / LLMO / AI-Search Visibility' (93), and 20 more. Cached for 5 minutes.",
+            side_effect="network",
+            input_schema={"type": "object", "properties": {}},
+            executor="builtin:gdy.categories", tags=["gdy", "meta", "read"],
+            error_codes=["gdy_auth", "gdy_network", "gdy_upstream"]),
+        SkillSpec(id="gdy.tools", name="GDY tools list",
+            description="List GDY tools, optionally filtered by category id. Pass category=18 for AI / Coding Agents (27 tools), category=20 for AI / Agent Frameworks (45), category=22 for AI Security (33), etc. Use gdy.categories first to discover ids. Paginated 1-100 per page.",
+            side_effect="network",
+            input_schema={"type": "object", "properties": {"category": {"type": "string"}, "page": {"type": "integer", "default": 1, "minimum": 1}, "per_page": {"type": "integer", "default": 25, "minimum": 1, "maximum": 100}}},
+            executor="builtin:gdy.tools", tags=["gdy", "meta", "read"],
+            error_codes=["gdy_auth", "gdy_network", "gdy_upstream", "invalid_args"]),
+        SkillSpec(id="gdy.search", name="GDY search",
+            description="Semantic / keyword search of the GDY index (842+ tools, 25 categories). Use when the user asks 'is there a tool for X' or 'find an agent that does Y' — Aion searches GDY instead of guessing.",
+            side_effect="network",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string", "minLength": 1}, "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}}},
+            executor="builtin:gdy.search", tags=["gdy", "search", "read"],
+            error_codes=["gdy_auth", "gdy_network", "gdy_upstream", "missing_required:query"]),
         # ---- 5 scenario matchers + 1 unified + 1 index = 7 new + 1 legacy = 8 ----
         SkillSpec(id="github.scenario.match", name="GitHub scenario match",
             description="Lookup the GitHub policy CSV. 500 rows grounded in 20+ GitHub docs pages (actions, secrets, API, webhooks, branch, Dependabot, Pages, etc.). Returns ranked matches with if_action / else_action / severity / source_doc. Never invents a row.",
@@ -330,10 +396,19 @@ def wire_executors() -> None:
     from .clients import extra_scenarios as exs
     from .clients import syntax as syn
     from .clients import ste_rewrite as ste
+    from .clients import gdy
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
         "builtin:writing.ste.rewrite": ste.writing_ste_rewrite,
+        "builtin:writing.ste.slop_suppress": ste.writing_ste_slop_suppress,
+        "builtin:writing.adhd_output": ste.writing_adhd_output,
+        "builtin:meta.book_to_skill": ste.meta_book_to_skill,
+
+        "builtin:gdy.me": gdy.gdy_me,
+        "builtin:gdy.categories": gdy.gdy_categories,
+        "builtin:gdy.tools": gdy.gdy_tools,
+        "builtin:gdy.search": gdy.gdy_search,
         "builtin:github.repo": gh.github_repo,
         "builtin:github.file": gh.github_file,
         "builtin:github.issues": gh.github_issues,
