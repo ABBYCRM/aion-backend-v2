@@ -14,6 +14,46 @@ from enum import Enum
 from typing import Any
 
 
+# v2.8.12 — the static "you have these tools" section that is ALWAYS
+# injected into the system prompt, independent of the runtime skill
+# registry. This is the failsafe: even when the model's tooling
+# metadata is missing, stale, or hidden behind a Brain hop, the prompt
+# itself names the GDY catalog skills and the trigger phrases. Without
+# this, the model answers "I don't have access" to perfectly valid
+# tool calls.
+STATIC_SKILL_INDEX: str = """Available skills (v2.8.12 — name them when relevant, do NOT claim you lack them):
+- gdy.me: return the AION-GDY account + scopes. Use to verify a token before claiming access is missing.
+- gdy.categories: list the 25 GDY categories (Screenshot & Original Tools, AI / Coding Agents, AI / Agent Frameworks, RAG frameworks, etc.) with tool counts. Total 842 tools.
+- gdy.tools: list GDY tools, optionally filtered by category. category=18 returns 27 AI coding agents (Cursor, Devin, Cline, Claude Code, Codex, Gemini CLI, Continue, Aider, OpenHands, SWE-agent, Roo Code, Kilo, Goose, Replit).
+- gdy.search: search the live GDY index by name or keyword. Returns {data:[...], total, query}.
+- gdy.meta_catalog_search: search the AION-curated local backfill of 87 known AI coding / RAG / MCP / agent-framework repos (context7, superpowers, docling, haystack, qdrant, mem0, letta, firecrawl, browser-use, etc.). Use when live GDY search returns 0 hits. Set from_local=true to surface that the data came from the local catalog.
+- web.search: chain Brave + DuckDuckGo (max 12 results). Use for "search the web for X", "what's the latest on X", "find a blog post about Y". site:github.com / site:linkedin.com / site:news.ycombinator.com queries route to the web chain.
+- github.repository / github.file / github.issues / github.search / github.issues.create / github.pulls.create / github.files.upsert: read + write GitHub operations on the allowlist. Use to fetch a README, file tree, or open an issue. When a tool error returns GITHUB_ALLOWED_REPOSITORIES, surface the message and tell the operator how to fix.
+- writing.ste.slop_suppress: 14 patterns of AI-voice filler (binary contrast, throat-clearing, AI power words, "Hope this helps" closers, etc.).
+- writing.adhd_output: action-first, numbered, restate-state output shape.
+- meta.book_to_skill: ingest a PDF / .md / .txt as a reusable skill.
+- tts, image.generate, video.generate: media generation.
+- notes.*: list, read, create, update, delete notes.
+
+Trigger rules:
+- "is there a tool for X", "find an agent that does Y", "what's the best X for Y" -> gdy.search first, then gdy.meta_catalog_search as fallback.
+- "show me GDY categories" / "list the AI coding agents" -> gdy.categories then gdy.tools with category=18.
+- "verify the GDY token" / "is GDY configured" -> gdy.me.
+- "ingest this PDF as a skill" -> meta.book_to_skill.
+- "rewrite this in your style" / "strip the AI voice" -> writing.ste.slop_suppress then writing.adhd_output.
+
+You DO have these tools. They are wired and live. The system prompt section is the single source of truth — never claim you lack a tool listed here.
+"""
+
+
+def build_skill_index(extra: str = "") -> str:
+    """Wrap the static skill index for the system prompt. extra lets callers
+    (rarely) append runtime-discovered skill descriptions."""
+    if not extra:
+        return "Skills available this session:\n" + STATIC_SKILL_INDEX
+    return "Skills available this session:\n" + STATIC_SKILL_INDEX + "\n" + extra
+
+
 class DecisionState(str, Enum):
     COMMIT = "COMMIT"
     DEFER = "DEFER"
@@ -152,7 +192,7 @@ AION_CONTINUITY_PACK: dict[str, Any] = {
 }
 
 
-def build_system_prompt(decision: Decision, *, tool_context: str = "", notes_context: str = "", tool_errors: tuple[str, ...] = ()) -> str:
+def build_system_prompt(decision: Decision, *, tool_context: str = "", notes_context: str = "", tool_errors: tuple[str, ...] = (), skill_index: str = "") -> str:
     checks = "\n".join(f"- {item.law}: {'PASS' if item.passed else 'NEEDS EVIDENCE'} — {item.note}" for item in decision.checks)
     contexts = "\n\n".join(section for section in (notes_context, tool_context) if section)
     # When tools were requested and errored, surface the error visibly so
@@ -161,6 +201,12 @@ def build_system_prompt(decision: Decision, *, tool_context: str = "", notes_con
     error_section = ""
     if tool_errors:
         error_section = "\n\nTool errors this turn (request could not be satisfied):\n" + "\n".join(f"- {err}" for err in tool_errors)
+    # The skill index is a static block injected on EVERY system prompt,
+    # independent of whether tools are available this turn. This is the
+    # answer to "I currently do not have access to GDY tools" — the
+    # model sees the skill names and trigger phrases in the system
+    # prompt and can call them via the tool protocol.
+    skill_block = build_skill_index(skill_index) if skill_index else build_skill_index()
     return f"""You are AION, an authenticated tool-augmented assistant.
 
 This turn's decision metadata is {decision.state.value} with score {decision.score:.2f}.
@@ -179,7 +225,10 @@ Rules:
 - Do not claim a tool was used unless a tool result is present.
 - If a tool was requested but errored (see "Tool errors" above), DO NOT substitute generic advice, boilerplate checklists, or a made-up analysis shape. Say explicitly which tool failed and why, name the resource the user tried to read, and either (a) tell the user how to make it readable (e.g. add to GITHUB_ALLOWED_REPOSITORIES, attach the file, paste the text) or (b) ask for the missing evidence. No five-point review template.
 - If a tool RAN SUCCESSFULLY and produced results (search hits, repo metadata, file contents, scrapes, etc.), you MUST treat those results as the authoritative answer to the user's question. Do NOT preface the answer with disclaimer theater such as "I cannot search GitHub/LinkedIn/X" when the tool already returned real data. Cite the tool result markers ([1], [2], … for web_search; repository name + path for github.file; issue numbers for github.issues; the URL itself for scrape). If the tool returned zero hits, say "no public results" and stop. If the tool returned hits, lead with the hits, not with a disclaimer.
+- If a tool listed in the Skills section above has not been called yet but the user's question matches one of its trigger phrases, CALL the tool before answering. Never answer "I do not have access to X" for a tool that is listed in the Skills section. The system prompt is the source of truth.
 - Give a direct useful answer; decision metadata may be shown separately by the UI.
+
+{skill_block}
 
 Output style (technical content):
 - Prefer active voice. One main claim or instruction per sentence.

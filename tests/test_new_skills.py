@@ -429,3 +429,38 @@ def test_contract_total_skill_count_is_46():
         ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
     ).decode().strip()
     assert out == "46", f"expected 46 SkillSpec, got {out}"
+
+
+def test_contract_status_warning_entries_have_warning_and_replacement():
+    """v2.8.12: the 3 status-warning repos (Continue, Roo-Code, AutoGen)
+    AND the active replacement fork (Roomote) are all in the
+    meta-catalog with `warning` or `replaced_by` flags. The agent can
+    then say 'use Roomote instead of Roo-Code' instead of misleading."""
+    p = Path("data/gdy_meta_catalog.json")
+    catalog = json.loads(p.read_text())
+    by_repo = {e["repo"]: e for e in catalog}
+    # 4 entries
+    assert "continuedev/continue" in by_repo
+    assert "RooCodeInc/Roo-Code" in by_repo
+    assert "microsoft/autogen" in by_repo
+    assert "RooCodeInc/Roomote" in by_repo
+    # Warning fields set
+    assert by_repo["continuedev/continue"].get("warning", "").startswith("archived")
+    assert by_repo["RooCodeInc/Roo-Code"].get("warning", "").startswith("archived")
+    assert by_repo["microsoft/autogen"].get("warning", "").startswith("maintenance")
+    # Roo-Code explicitly points to its replacement
+    assert by_repo["RooCodeInc/Roo-Code"].get("replaced_by") == "RooCodeInc/Roomote"
+
+
+def test_gdy_meta_catalog_search_returns_warning_when_archived():
+    """v2.8.12: searching for an archived repo surfaces the warning."""
+    from app.skills.clients import gdy
+    r = asyncio.get_event_loop().run_until_complete(
+        gdy.gdy_meta_catalog_search({"query": "Roo-Code", "limit": 5}, {})
+    )
+    assert r["ok"] is True
+    # Find Roo-Code in hits
+    roo = next((h for h in r["hits"] if h["repo"] == "RooCodeInc/Roo-Code"), None)
+    assert roo is not None, "RooCodeInc/Roo-Code not in hits"
+    assert roo.get("warning", "").startswith("archived")
+    assert roo.get("replaced_by") == "RooCodeInc/Roomote"

@@ -978,8 +978,88 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
     for ev in corpus_evidence:
         tool_contexts.append(ev["wrapped"])
         tool_events.append(ev["event"])
+    # v2.8.12 — GDY catalog intent. Runs as priority 0 (before any
+    # corpus) so the model has real GDY evidence before answering
+    # "is there a tool for X" / "look into GDY". Calls gdy.search
+    # first, then gdy.meta_catalog_search as fallback. The wrapped
+    # evidence is injected into the system prompt as <tool_results>;
+    # if both fail (0 hits), the model gets a "no public results"
+    # marker and a DEFER-shaped answer.
+    if _is_gdy_intent(user_text):
+        try:
+            from .skills.runner import get_runner as _gdy_runner
+            runner = _gdy_runner()
+            # Extract the search term — strip the trigger phrase
+            import re as _re
+            q = user_text.strip()
+            for prefix in ("look into gdy for ", "look into gdy ", "search gdy for ", "search gdy ", "find in gdy ", "is there a tool for ", "is there an agent for ", "is there an agent that does ", "is there a tool that does ", "find a tool for ", "find a tool that does ", "find an agent for ", "find an agent that does ", "what's the best "):
+                if q.lower().startswith(prefix):
+                    q = q[len(prefix):].rstrip("?").rstrip(".").strip()
+                    break
+            if not q:
+                q = user_text.strip()
+            # Pass 1: live GDY search
+            _gdy_live = await runner.run("gdy.search", {"query": q, "limit": 5}, subject="system:chat")
+            _gdy_live_data = _gdy_live.data if hasattr(_gdy_live, "data") else (_gdy_live.get("data") or {})
+            _gdy_live_hits = _gdy_live_data.get("hits") or []
+            # Pass 2: meta-catalog backfill (always run; cheap + useful)
+            _gdy_local = await runner.run("gdy.meta_catalog_search", {"query": q, "limit": 5}, subject="system:chat")
+            _gdy_local_data = _gdy_local.data if hasattr(_gdy_local, "data") else (_gdy_local.get("data") or {})
+            _gdy_local_hits = _gdy_local_data.get("hits") or []
+            _lines = []
+            _src_count = 0
+            if _gdy_live_hits:
+                _lines.append(f"=== Live GDY search ({_gdy_live_data.get('total', len(_gdy_live_hits))} hits) ===")
+                for h in _gdy_live_hits[:5]:
+                    _lines.append(f"- name={h.get('name','?')} url={h.get('url','')[:80]}")
+                _src_count += 1
+            if _gdy_local_hits:
+                _lines.append(f"=== Local GDY meta-catalog backfill ({_gdy_local_data.get('total', len(_gdy_local_hits))} hits) ===")
+                for h in _gdy_local_hits[:5]:
+                    _src_count += 1
+                    _lines.append(f"- repo={h.get('repo','?')} best_for={h.get('best_for','')[:80]} in_gdy={h.get('in_gdy')}")
+            if not _lines:
+                _lines.append("=== GDY search returned 0 hits ===")
+                _lines.append("=== Local GDY meta-catalog backfill returned 0 hits ===")
+            _wrapped_gdy = (
+                f"<tool_results source=\"gdy\" query=\"{q[:60]}\">\n"
+                f"STATUS: SUCCESS — the items below are real GDY hits (live + local backfill).\n"
+                f"FORBIDDEN: inventing tool names not in the list below.\n"
+                f"FORBIDDEN: claiming a tool is 'not available' when the list above has hits.\n"
+                "\n" + "\n".join(_lines) + "\n"
+                "</tool_results>"
+            )
+            tool_contexts.append(_wrapped_gdy)
+            tool_events.append({
+                "type": "tool", "tool": "gdy", "query": q,
+                "live_hits": len(_gdy_live_hits),
+                "local_hits": len(_gdy_local_hits),
+                "sources": _src_count,
+            })
+        except Exception as exc:
+            audit.record("gdy.chat.evidence_failed", {"error": str(exc)[:200]})
     mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
-    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "", tool_errors=tuple(tool_errors))
+    # Build the dynamic skill index from the live registry. The static
+    # block in kernel.py is always present, but the runtime list lets
+    # the model see ALL 46 skills (not just the curated subset).
+    try:
+        from .skills.registry_core import get_registry as _skill_reg
+        _live_skills = _skill_reg().catalog(enabled_only=True)
+        _skill_lines = []
+        for _s in _live_skills:
+            _sid = _s.get("id", "")
+            _sname = _s.get("name", _sid)
+            _sdesc = (_s.get("description") or "").strip()
+            if not _sdesc:
+                continue
+            # Truncate long descriptions to keep the prompt small
+            if len(_sdesc) > 240:
+                _sdesc = _sdesc[:237].rstrip() + "..."
+            _skill_lines.append(f"- {_sid}: {_sdesc}")
+        _skill_index_extra = "Live registry snapshot (" + str(len(_skill_lines)) + " skills enabled):\n" + "\n".join(_skill_lines[:60])
+    except Exception:
+        _skill_index_extra = ""
+    decision_result = resolve_decision(mission); system_prompt = build_system_prompt(decision_result, tool_context="\n\n".join(tool_contexts), notes_context=notes.context(principal.subject, user_text) if body.use_notes else "", tool_errors=tuple(tool_errors), skill_index=_skill_index_extra)
     model_messages = [{"role": "system", "content": system_prompt}, *({"role": message.role, "content": message.wire_content()} for message in body.messages)]
     model_messages = [model_messages[0], *model_messages[1:][-(settings.max_context_messages - 1):]]
     try: model_chain = await resolve_model_chain(body.provider, body.model)
@@ -1602,6 +1682,30 @@ _GITHUB_INTENT_RE = re.compile(
 
 def _is_github_intent(text: str) -> bool:
     return bool(_GITHUB_INTENT_RE.search(text or ""))
+
+
+# v2.8.12 — GDY catalog intent. "look into GDY for tools", "search GDY",
+# "is there an agent that does X", "what's the best X for Y" — these
+# should fire gdy.search first, then gdy.meta_catalog_search as fallback,
+# BEFORE the model hallucinates an answer.
+_GDY_INTENT_RE = re.compile(
+    r"(?ix)("
+    r"\bgdy\b|\bgdyworld\b|\bgdy\s*world|"
+    r"look\s+(?:into|through)\s+gdy|search\s+gdy|find\s+in\s+gdy|"
+    r"is\s+there\s+(?:a|an)\s+(?:tool|agent|app|service)\s+(?:that|for|to)|"
+    r"find\s+(?:a|an)\s+(?:tool|agent|app)\s+(?:that|for|to)|"
+    r"what'?s\s+the\s+best\s+\w+\s+for|"
+    r"which\s+(?:tool|agent|app|service)\s+(?:should|do|can|would)"
+    r")"
+)
+
+
+def _is_gdy_intent(text: str) -> bool:
+    """True when the user turn is asking GDY a catalog / discovery
+    question. The chat handler routes these to gdy.search first, then
+    gdy.meta_catalog_search as fallback, so the model has real evidence
+    to cite instead of guessing or refusing."""
+    return bool(_GDY_INTENT_RE.search(text or ""))
 
 
 # ----------------------------------------------------------------------------

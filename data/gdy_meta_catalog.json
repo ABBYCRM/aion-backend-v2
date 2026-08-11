@@ -817,7 +817,7 @@
   },
   {
     "repo": "continuedev/continue",
-    "name": "Continue (archived)",
+    "name": "Continue (read-only)",
     "section": "Status warnings",
     "best_for": "Original Continue repository is read-only following Continue's acquisition by Cursor",
     "github": true,
@@ -825,21 +825,23 @@
     "category": "ai-coding-agents",
     "mcp": false,
     "primary_language": "typescript",
-    "warning": "archived",
+    "warning": "archived \u2014 Cursor acquired Continue; new work happens in Cursor",
     "in_gdy": true
   },
   {
     "repo": "RooCodeInc/Roo-Code",
     "name": "Roo Code (archived)",
     "section": "Status warnings",
-    "best_for": "Original repository archived; org developing Roomote instead",
+    "best_for": "Original Roo Code repository archived; org's new project is Roomote",
     "github": true,
     "stars": "high",
     "category": "ai-coding-agents",
-    "mcp": false,
+    "mcp": true,
     "primary_language": "typescript",
-    "warning": "archived",
-    "in_gdy": false
+    "warning": "archived \u2014 replaced by Roomote (https://github.com/RooCodeInc/Roomote)",
+    "in_gdy": false,
+    "replaced_by": "RooCodeInc/Roomote",
+    "replacement_url": "https://github.com/RooCodeInc/Roomote"
   },
   {
     "repo": "microsoft/autogen",
@@ -851,8 +853,8 @@
     "category": "agent-frameworks",
     "mcp": false,
     "primary_language": "python",
-    "warning": "maintenance-mode",
-    "in_gdy": false
+    "warning": "maintenance-mode \u2014 use Microsoft Agent Framework for new work",
+    "in_gdy": true
   },
   {
     "repo": "mem0ai/mem0",
@@ -1044,6 +1046,19 @@
     "category": "other",
     "mcp": false,
     "primary_language": "typescript",
+    "in_gdy": false
+  },
+  {
+    "repo": "RooCodeInc/Roomote",
+    "name": "Roomote",
+    "section": "Status warnings",
+    "best_for": "Active replacement for the archived Roo-Code \u2014 current development target of the RooCodeInc org",
+    "github": true,
+    "stars": "low",
+    "category": "ai-coding-agents",
+    "mcp": true,
+    "primary_language": "typescript",
+    "replaces": "RooCodeInc/Roo-Code",
     "in_gdy": false
   }
 ]
