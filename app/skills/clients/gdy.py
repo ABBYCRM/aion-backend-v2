@@ -330,11 +330,15 @@ def _load_meta_catalog() -> list[dict]:
     global _META_CATALOG_CACHE
     if _META_CATALOG_CACHE is not None:
         return _META_CATALOG_CACHE
-    if not _META_CATALOG_PATH.exists():
+    import sys as _sys
+    print(f"DEBUG gdy.meta_catalog: _META_CATALOG_PATH={_META_CATALOG_PATH!r} exists={bool(_META_CATALOG_PATH and _META_CATALOG_PATH.is_file())} cwd={_Path.cwd()!r}", flush=True)
+    if not _META_CATALOG_PATH or not _META_CATALOG_PATH.is_file():
         return []
     try:
         _META_CATALOG_CACHE = _json.loads(_META_CATALOG_PATH.read_text())
-    except Exception:
+        print(f"DEBUG gdy.meta_catalog: loaded {len(_META_CATALOG_CACHE)} entries", flush=True)
+    except Exception as exc:
+        print(f"DEBUG gdy.meta_catalog: load failed: {exc!r}", flush=True)
         _META_CATALOG_CACHE = []
     return _META_CATALOG_CACHE
 
