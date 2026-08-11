@@ -427,7 +427,7 @@ _NO_AI_SLOP_PATTERNS: list[tuple[re.Pattern, str]] = [
     # 6. Interpretive metadiscourse
     (re.compile(r"\b(?:that\s+last\s+part\s+matters\s+more\s+than\s+it\s+sounds|the\s+key\s+point\s+is[,]?\s*|as\s+you\s+can\s+see[,]?\s*|this\s+distinction\s+matters[,]?\s*|it'?s\s+worth\s+noting\s+that\s+|the\s+reality\s+is[,]?\s*|the\s+truth\s+is[,]?\s*|in\s+other\s+words[,]?\s*)", re.I), "Cut: interpretive metadiscourse — let the prose speak. "),
     # 7. Weasel attribution
-    (re.compile(r"\b(?:experts\s+agree\s+that|industry\s+reports\s+suggest|many\s+argue\s+that|widely\s+regarded\s+as|studies\s+show\s+that|it\s+is\s+widely\s+believed\s+that)\s+", re.I), "Cut: weasel attribution — name the source or cut the claim. "),
+    (re.compile(r"\b(?:experts\s+agree\s+that|industry\s+reports\s+suggest|many\s+argue\s+that|widely\s+regarded\s+as|studies\s+show(?:\s+that)?|it\s+is\s+widely\s+believed\s+that|experts\s+agree|some\s+would\s+say)\s*", re.I), "Cut: weasel attribution — name the source or cut the claim. "),
     # 8. Fake-strong verbs
     (re.compile(r"\b(?:serves\s+as\s+a\s+centralized\s+hub\s+for|acts\s+as\s+a\s+foundation\s+for|functions\s+as\s+a\s+backbone\s+for)\b", re.I), "Cut: fake-strong verb — use 'is' or 'has'. "),
     # 9. Synonym cycling markers
@@ -440,8 +440,10 @@ _NO_AI_SLOP_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:the\s+future\s+is(?:n'?t|\s+not)\s+coming[.,;]?\s+it(?:'?s|\s+is)\s+already\s+here|the\s+future\s+is\s+already\s+here|this\s+changes\s+everything|this\s+is\s+huge|this\s+is\s+a\s+game\s+changer|paradigm\s+shift)\b", re.I), "Cut: faux-profound ending — state the consequence, not the cliché. "),
     # 13. Banned power words from no-ai-slop
     (re.compile(r"\b(?:delve|leverage|utilize|facilitate|empower|streamline|cutting-edge|game\s+changer|paradigm\s+shift|tapestry|realm|beacon|multifaceted|meticulous|intricate|paramount|transformative|elevate|embark|supercharge|harness|ever-evolving)\b", re.I), "Cut: AI power word — use a concrete alternative. "),
-    # 14. "Let's dive in" / "Hope this helps" closers
-    (re.compile(r"(?:^|\.\s+)(?:let'?s\s+dive\s+in[.,]?\s*|hope\s+this\s+helps[.,]?\s*|that'?s\s+the\s+whole\s+thing[.,]?\s*|at\s+the\s+end\s+of\s+the\s+day[.,]?\s*|when\s+all\s+is\s+said\s+and\s+done[.,]?\s*)", re.I), "Cut: AI throat-clearing closer — end with the next action. "),
+    # 14. "Let's dive in" / "Hope this helps" closers — drop regardless of
+    # whether they sit at a sentence boundary. The user-visible reply
+    # shouldn't end on these regardless of punctuation.
+    (re.compile(r"\blet'?s\s+dive\s+in[.,]?\s*|hope\s+this\s+helps[.,]?\s*|that'?s\s+the\s+whole\s+thing[.,]?\s*|at\s+the\s+end\s+of\s+the\s+day[.,]?\s*|when\s+all\s+is\s+said\s+and\s+done[.,]?\s*", re.I), "Cut: AI throat-clearing closer — end with the next action. "),
 ]
 
 

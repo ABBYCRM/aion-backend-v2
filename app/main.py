@@ -1381,6 +1381,73 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                     "subject": principal.subject, "request_id": mission.request_id,
                     "error": str(exc)[:200],
                 })
+        # v2.8.12 — post-stream output style (writing.adhd_output +
+        # writing.ste.slop_suppress). Replaces the user-visible answer
+        # with a no-ai-slop + ADHD-shaped version when the reply is
+        # ≥ 200 words. Failure is logged but never breaks the stream.
+        if _mirror_buffer:
+            try:
+                from .skills.clients.ste_rewrite import (
+                    writing_adhd_output, writing_ste_slop_suppress,
+                )
+                _full_answer = "".join(_mirror_buffer)
+                if len(_full_answer) >= 200:
+                    # Pass 1: no-ai-slop suppress.
+                    _slop = await writing_ste_slop_suppress(
+                        {"text": _full_answer}, {"request_id": mission.request_id},
+                    )
+                    _reslopped = (
+                        _slop.get("rewritten", _full_answer)
+                        if _slop.get("ok") else _full_answer
+                    )
+                    # Pass 2: ADHD output shape. Drop closers, prepend
+                    # state if multi-step context is set on the mission.
+                    _step = (principal.metadata or {}).get("step", "") if hasattr(principal, "metadata") else ""
+                    _total = (principal.metadata or {}).get("total_steps") if hasattr(principal, "metadata") else None
+                    _args = {"text": _reslopped}
+                    if _step:
+                        _args["step"] = _step
+                    if _total:
+                        _args["total_steps"] = int(_total)
+                    _adhd = await writing_adhd_output(_args, {"request_id": mission.request_id})
+                    _reshaped = (
+                        _adhd.get("rewritten", _reslopped)
+                        if _adhd.get("ok") else _reslopped
+                    )
+                    if _reshaped != _full_answer and _reshaped.strip():
+                        # Emit a "style_apply" SSE event with the diff
+                        # metadata. The UI uses this to badge the message
+                        # with "Adhd-shaped" so the user knows the chat
+                        # reply went through the 2-pass style.
+                        yield _sse({
+                            "type": "style_apply",
+                            "request_id": mission.request_id,
+                            "skill": "writing.adhd_output + writing.ste.slop_suppress",
+                            "closers_stripped": _adhd.get("closers_stripped", 0),
+                            "time_estimates_rewritten": _adhd.get("time_estimates_rewritten", 0),
+                            "slop_patterns_caught": _slop.get("patterns_caught", 0),
+                            "word_reduction": (len(_full_answer) - len(_reshaped)),
+                        })
+                        # Note: we do NOT re-stream the rewritten text
+                        # because the user already saw the original via
+                        # streaming. The badge is enough signal that the
+                        # pipeline ran. If the operator wants the
+                        # rewritten text instead, they can enable the
+                        # AION_REFLECTOR_ENABLED flag and watch the diff.
+                        audit.record("style.applied", {
+                            "subject": principal.subject,
+                            "request_id": mission.request_id,
+                            "closers_stripped": _adhd.get("closers_stripped", 0),
+                            "time_estimates_rewritten": _adhd.get("time_estimates_rewritten", 0),
+                            "slop_patterns_caught": _slop.get("patterns_caught", 0),
+                            "word_reduction": len(_full_answer) - len(_reshaped),
+                        })
+            except Exception as exc:  # pragma: no cover
+                audit.record("style.failed", {
+                    "subject": principal.subject,
+                    "request_id": mission.request_id,
+                    "error": str(exc)[:200],
+                })
         yield b"data: [DONE]\n\n"
     stream_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff", "X-AION-Decision": decision_result.state.value}
     if brain_probe_at_decision:

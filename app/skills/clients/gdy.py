@@ -11,7 +11,9 @@ API surface used (base = https://gdyworld.com/v1):
   GET /tools?category=<id>&page=<n>&perPage=<n>
                      — paginated tool list, filter by category id
   GET /categories    — full category tree with tool counts
-  POST /search       — semantic / keyword search (body: {q, limit})
+  GET /search?q=<q>&limit=<n>
+                     — semantic / keyword search (response uses the
+                       same {data: [...]} envelope as /tools)
 
 Authentication:
   The token is read from vault key GDY_API_KEY (never from chat). A
@@ -168,8 +170,14 @@ class GdyClient:
         return await self._request("GET", "/tools", params=params)
 
     async def search(self, query: str, *, limit: int = 20) -> dict[str, Any]:
-        """Semantic / keyword search of the GDY index."""
-        return await self._request("POST", "/search", json_body={"q": query, "limit": limit})
+        """Semantic / keyword search of the GDY index.
+
+        GDY's actual search endpoint is GET /v1/search?q=<query> and the
+        response uses the {data: [...]} envelope (same as /tools).
+        Earlier we hit POST /v1/search which returns 401 with the
+        user-search scope missing, so we use the verified path here.
+        """
+        return await self._request("GET", "/search", params={"q": query, "limit": limit})
 
 
 # ----------------------------------------------------------------
@@ -269,3 +277,101 @@ async def gdy_search(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any
         }
     except GdyError as exc:
         return {"ok": False, "skill_id": "gdy.search", "error_code": exc.code, "error_message": str(exc)}
+
+
+# ===========================================================================
+# v2.8.12 — local meta-catalog backfill
+# ===========================================================================
+# GDY's live index has only ~17 of the 70+ repos from the operator's
+# ai-coding-rag-skills-github-directory.md doc. When the agent is asked
+# "what's the best X for Y", and X is not in GDY (e.g. context7,
+# superpowers, claude-context, docling, haystack, qdrant), the live
+# /v1/search?q=X returns 0 hits. To keep the agent useful, we ship a
+# curated data/gdy_meta_catalog.json with the full directory + best_for
+# and section, and expose it via gdy.meta_catalog_search. The agent
+# hits live GDY first, then falls back to the local catalog with a
+# "from_local" flag so the user knows where the data came from.
+import json as _json
+from pathlib import Path as _Path
+
+# Find the repo root by walking up from this file until we find the
+# data/ directory next to us. This avoids off-by-one path bugs.
+_META_CATALOG_PATH: _Path | None = None
+for _candidate in (_Path(__file__).resolve().parent, *_Path(__file__).resolve().parents):
+    if (_candidate / "data" / "gdy_meta_catalog.json").is_file():
+        _META_CATALOG_PATH = _candidate / "data" / "gdy_meta_catalog.json"
+        break
+if _META_CATALOG_PATH is None:
+    # Fallback: assume CWD-relative
+    _META_CATALOG_PATH = _Path("data/gdy_meta_catalog.json").resolve()
+_META_CATALOG_CACHE: list[dict] | None = None
+
+
+def _load_meta_catalog() -> list[dict]:
+    global _META_CATALOG_CACHE
+    if _META_CATALOG_CACHE is not None:
+        return _META_CATALOG_CACHE
+    if not _META_CATALOG_PATH.exists():
+        return []
+    try:
+        _META_CATALOG_CACHE = _json.loads(_META_CATALOG_PATH.read_text())
+    except Exception:
+        _META_CATALOG_CACHE = []
+    return _META_CATALOG_CACHE
+
+
+async def gdy_meta_catalog_search(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """Skill: gdy.meta_catalog_search — search the local AION-curated
+    meta-catalog (data/gdy_meta_catalog.json) of 70+ AI coding / RAG /
+    MCP / agent-framework repos. Used as a fallback when live GDY
+    search returns 0 hits. The local catalog includes best_for,
+    section, mcp, primary_language, and in_gdy flags.
+
+    Inputs:
+      query (required): free-text term to match against name, repo, best_for, section
+      limit (optional, default 10): max hits to return
+      section (optional): filter by directory section name (e.g. "AI coding agents")
+    """
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "skill_id": "gdy.meta_catalog_search",
+                "error_code": "missing_required:query",
+                "error_message": "query is required"}
+    try:
+        limit = max(1, min(50, int(args.get("limit") or 10)))
+    except (TypeError, ValueError):
+        limit = 10
+    section = (args.get("section") or "").strip().lower()
+    catalog = _load_meta_catalog()
+    if not catalog:
+        return {"ok": False, "skill_id": "gdy.meta_catalog_search",
+                "error_code": "catalog_not_loaded",
+                "error_message": "data/gdy_meta_catalog.json not found or empty"}
+    ql = query.lower()
+    hits: list[dict[str, Any]] = []
+    for entry in catalog:
+        if section and entry.get("section", "").lower() != section:
+            continue
+        # Score: name match > repo match > best_for match > section match
+        score = 0
+        if ql in entry.get("name", "").lower():
+            score += 10
+        if ql in entry.get("repo", "").lower():
+            score += 6
+        for token in ql.split():
+            if token in entry.get("best_for", "").lower():
+                score += 2
+            if token in entry.get("section", "").lower():
+                score += 1
+        if score > 0:
+            hits.append({"score": score, **entry})
+    hits.sort(key=lambda h: -h["score"])
+    return {
+        "ok": True,
+        "skill_id": "gdy.meta_catalog_search",
+        "query": query,
+        "source": "data/gdy_meta_catalog.json",
+        "from_local": True,
+        "total": len(hits),
+        "hits": hits[:limit],
+    }
