@@ -1,0 +1,54 @@
+100K SYNTAX EXAMPLES PER TECHNOLOGY — FINAL VALIDATION REPORT
+Generated UTC: 2026-08-05T06:57:18.630405+00:00
+
+Core archive: 100k_syntax_core_9.zip
+Core technologies: 9
+Core syntax records: 900,000
+Core bytes: 8317138
+Core SHA-256: c9a9436e0b453fb73b6165b4e576fb6a27bbce87ffb627fda725a267eded5a23
+
+Additional archive: 100k_syntax_additional_29.zip
+Additional technologies: 29
+Additional syntax records: 2,900,000
+Additional bytes: 29131194
+Additional SHA-256: 353483cf9ccc9ef20594f8ef486bb27ff32d669ef49dc1ba63dda2e81f4762dc
+
+Grand total technologies: 38
+Grand total syntax records: 3,800,000
+
+FINAL FILE-BY-FILE AUDIT
+- Every one of the 3,800,000 records was reread: PASS
+- Exact sequential IDs 000001 through 100000 in every file: PASS
+- Every JSON-escaped syntax snippet decoded successfully: PASS
+- 100,000 unique syntax snippets in every technology file: PASS
+- Every file SHA-256 recorded in its manifest: PASS
+- ZIP CRC and exact member-list checks for both archives: PASS
+- Real Python scenario+syntax merge test: PASS (Merged 100,000 rows into /tmp/tmpv91he27w/python_merged.txt)
+
+REPRESENTATIVE PARSER/COMPILER EVIDENCE
+- Python: PASS | ast.parse(10 representative construct families)
+- JavaScript: PASS | node --check /tmp/tmpzsbwlzua/syntax.js
+- TypeScript: PASS | tsc --noEmit --strict --target ES2020 --lib ES2020,DOM /tmp/tmpzsbwlzua/syntax.ts
+- C: PASS | gcc -std=c17 -Wall -Wextra -fsyntax-only /tmp/tmpzsbwlzua/syntax.c
+- C++: PASS | g++ -std=c++20 -Wall -Wextra -fsyntax-only /tmp/tmpzsbwlzua/syntax.cpp
+- Java: PASS | javac --release 17 /tmp/tmpzsbwlzua/Syntax.java
+- Go: PASS | gofmt -w /tmp/tmpzsbwlzua/syntax.go
+- PHP: PASS | php -l /tmp/tmpzsbwlzua/syntax.php
+- Ruby: PASS | ruby -c /tmp/tmpzsbwlzua/syntax.rb
+- Swift: PASS | swiftc -parse /tmp/tmpzsbwlzua/syntax.swift
+- Kotlin: PASS | kotlinc /tmp/tmpzsbwlzua/Syntax.kt -d /tmp/tmpzsbwlzua/syntax.jar
+- Perl: PASS | perl -c /tmp/tmpzsbwlzua/syntax.pl
+- Bash: PASS | bash -n /tmp/tmpzsbwlzua/syntax.sh
+- SQL: PASS | sqlite3 executescript(10 representative construct families)
+- CSS: PASS | tinycss2.parse_stylesheet(10 representative construct families)
+- HTML: PASS | html.parser.HTMLParser(10 representative construct families)
+- Assembly: PASS | gcc -c /tmp/tmpzsbwlzua/syntax.s -o /tmp/tmpzsbwlzua/syntax.o
+- Fortran: PASS | gfortran -std=f2018 -fsyntax-only /tmp/tmpzsbwlzua/syntax.f90
+
+DEFECTS FOUND AND FIXED DURING AUDIT
+- C validation wrapper omitted the ID-specific variable used by one conditional sample: fixed and recompiled.
+- Fortran validation wrapper omitted three ID-specific declarations: fixed and recompiled.
+- SQL syntax file was truncated at record 73,203 by an execution cutoff: regenerated through record 100,000 and fully re-audited.
+
+SCOPE DISCLOSURE
+The files contain 100,000 unique instantiated syntax examples per technology, derived from ten technology-specific construct families. They are not a claim that each language has 100,000 distinct grammar rules. Technologies without an installed parser/compiler received exhaustive structural checks but not executable compiler validation.

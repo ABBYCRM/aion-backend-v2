@@ -1,0 +1,1014 @@
+        MULTI-TENANT APPLICATION
+                SECURITY
+                                    A step-by-step class for new developers
+
+          How to build an app where User A cannot read, change, delete, cache, or
+                            accidentally receive User B's data.
+
+
+
+    The one rule this entire course protects
+    Identity flows from the server, never from the client. The browser may request a resource, but it
+    never gets to declare who owns the request.
+
+
+
+ BEGINNER TRACK | EXPRESS + POSTGRESQL / DRIZZLE EXAMPLES | WEB + MOBILE NOTES
+
+
+
+
+   Course handbook • Implementation guide • Security checklist • Testing workbook
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                      Page 1
+ How to use this class
+ You do not need to be an authentication expert. You should be comfortable reading very small pieces of
+ JavaScript or TypeScript. Every unfamiliar security term is introduced before it is used.
+
+
+ What you will be able to do
+   • Explain the difference between authentication (who are you?) and authorization (what may you touch?).
+   • Implement OIDC/PKCE login without inventing a password system.
+   • Create opaque server-side sessions and resolve a user on every protected request.
+   • Design tenant-owned database tables and safely scope SELECT, INSERT, UPDATE, DELETE, and UPSERT
+     operations.
+   • Recognize IDOR vulnerabilities, fail closed, and prevent cross-user cache/job leakage.
+   • Prove isolation with two independent users and hostile requests.
+
+
+ How to study
+ Work lesson by lesson. Type the short examples yourself. At each checkpoint, explain the invariant aloud
+ before moving on. The goal is not to memorize syntax; it is to make unsafe identity flow look obviously
+ wrong.
+
+    Scope
+    This class teaches a strong application-level isolation pattern. A production system also needs
+    ordinary security work such as dependency patching, secrets management, rate limiting, logging,
+    backups, incident response, and threat modeling.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                     Page 2
+ Course map
+      Lesson      Topic                         Outcome
+
+      1           Mental model                  Understand client, server, database, user, tenant
+
+      2           The core invariant            Know where identity may come from
+
+      3           OIDC + PKCE                   Understand secure external login
+
+      4           Server sessions               Store identity/tokens on the server
+
+      5           Auth middleware               Turn a cookie into req.user
+
+      6           Database ownership            Model tenant-owned rows
+
+      7           Safe CRUD                     Scope all reads and writes
+
+      8           IDOR defense                  Protect single-resource operations
+
+      9           Fail closed                   Handle broken/expired auth safely
+
+      10          Frontend vs security          Keep authorization on server
+
+      11          Caches, jobs, files           Carry isolation beyond SQL
+
+      12          Organization tenancy          Add tenant + membership roles
+
+      13          Audit                         Mechanically inspect every data path
+
+      14          Two-user tests                Prove User A cannot affect User B
+
+      15          Build plan                    Implement in a reliable order
+
+      16          Final assessment              Verify the complete mental model
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                  Page 3
+ Lesson 1 - The mental model
+    Learning goal
+    Understand what “multi-tenant” means before touching authentication code.
+
+
+ Start with four objects
+ Client: the browser or mobile app. It displays UI and sends requests. Assume a determined user can
+ modify every request it sends.
+
+ Server: your API. This is where authentication and authorization decisions belong because users do not
+ control its code.
+
+ Database: persistent storage such as PostgreSQL. Tenant-owned rows need an ownership field.
+
+ Tenant: the security boundary whose data must stay isolated. In a personal app the tenant may be one
+ user. In a business app it may be an organization.
+
+
+ Authentication is not authorization
+ Authentication answers “Who are you?” Authorization answers “May you operate on this specific object?”
+ A logged-in user is not automatically allowed to access every row in the database.
+
+   User A signs in successfully.              # authenticated
+   User A requests Project B-42.              # still needs authorization
+   Server proves B-42 belongs to B.           # deny A
+
+
+ What cross-contamination means
+ Cross-contamination is data or state crossing a tenant boundary. It can be obvious, like reading another
+ user's bookmark, or subtle, like a cache entry keyed only by project ID, a background job missing its
+ tenant, or a global “currentUser” variable reused by concurrent requests.
+
+    Checkpoint
+    If the browser can change a value in DevTools and thereby become another user, the design is
+    broken. Security must still work against a custom HTTP client with no frontend at all.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                       Page 4
+ Lesson 2 - The core invariant
+    Learning goal
+    Learn the request chain that every protected operation must follow.
+
+   opaque session credential
+           |
+           v
+   server-side session lookup
+           |
+           v
+   verified user -> req.user
+           |
+           v
+   query constrained by req.user.id
+
+ An opaque value is deliberately meaningless to the browser. The browser knows “this is my session
+ credential,” but it cannot decode a user ID out of it or edit the user identity inside it.
+
+
+ The forbidden path
+   request body / query string / route userId
+                     |
+                     v
+            authorization decision    # WRONG
+
+ A client may send a resource identifier such as /projects/42. That answers “which resource?” It may not
+ send an authoritative owner identity such as ?userId=7. Ownership comes from the authenticated server
+ context.
+
+
+ A useful invariant
+    Say this before writing a route
+    “The requested resource ID may come from the client. The authenticated owner/tenant ID may not.”
+
+
+ Mini exercise
+ Mark each value as client input or server identity: projectId from URL; display name from form; req.user.id
+ from middleware; userId from JSON. Answer: projectId and display name are client input; req.user.id is
+ server-derived identity; JSON userId must never become authoritative identity.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                     Page 5
+ Lesson 3 - OIDC + PKCE login
+    Learning goal
+    Understand how a trusted identity provider proves who signed in without your app inventing
+    authentication.
+
+
+ OIDC in plain English
+ OpenID Connect (OIDC) lets your app rely on an identity provider for sign-in. The provider verifies the
+ account. Your server validates the protocol response and uses a stable provider-issued subject identifier,
+ usually the sub claim, as the external identity anchor.
+
+
+ PKCE in plain English
+ PKCE binds the authorization request to the later code exchange. Your app creates a random code
+ verifier, derives a challenge, sends the challenge during authorization, and must present the original
+ verifier when exchanging the returned code. A stolen authorization code alone is therefore less useful.
+
+
+ The login sequence
+   • Generate a cryptographically random PKCE verifier.
+   • Derive its challenge.
+   • Generate and retain protocol state as required by the OIDC client.
+   • Redirect the browser to the provider.
+   • Receive the callback containing an authorization code.
+   • Validate callback protections such as state using the OIDC library.
+   • Exchange the code while presenting the original verifier.
+   • Cryptographically validate the returned tokens/provider metadata.
+   • Read the stable verified sub claim.
+   • Look up or create the local user for that verified external identity.
+
+    Do not do this yourself
+    Use a maintained OIDC client library. Authentication protocols have subtle validation requirements.
+    “It redirects correctly” is not proof that a custom implementation is safe.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                         Page 6
+ Lesson 3 lab - thinking through the callback
+   // Conceptual only: let the OIDC library perform protocol validation.
+   const tokens = await oidc.exchangeCode({ code, codeVerifier });
+   const claims = await oidc.validatedClaims(tokens);
+   const providerSubject = claims.sub;
+
+   if (!providerSubject) throw new Error('Missing subject');
+   const user = await upsertUserFromVerifiedSubject(providerSubject);
+
+ Notice what is absent: the server does not accept an email or user ID from a callback form and call it
+ identity. The trusted value comes from a successfully validated identity-provider response.
+
+
+ Email is usually the wrong anchor
+ Email addresses can change and have provider-specific verification semantics. A stable provider-issued
+ subject is designed to identify the principal within the provider context. If multiple issuers are supported,
+ model the issuer plus subject as the external identity key rather than assuming the same sub is globally
+ unique across issuers.
+
+
+ Common mistakes to recognize
+   • Using decoded token contents without verifying signature/claims.
+   • Ignoring state/callback validation required by the client library.
+   • Reusing a PKCE verifier between independent login attempts.
+   • Treating a client-supplied email as proof of identity.
+   • Logging access or refresh tokens in ordinary request logs.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 7
+ Lesson 4 - Opaque server-side sessions
+    Learning goal
+    Keep session meaning and provider tokens on the server.
+
+
+ A conceptual sessions table
+   sessions
+     id               random, high-entropy session identifier
+     userId           foreign key -> users.id
+     accessToken      provider token, protected server-side
+     refreshToken     provider token, protected server-side
+     expiresAt        application/provider expiration policy
+     createdAt        audit/lifecycle metadata
+
+ The browser receives only the session credential. In a web app this is commonly a cookie. The database
+ turns the random credential into a user relationship.
+
+
+ Cookie properties
+        Attribute                Meaning
+
+        HttpOnly                 Browser JavaScript cannot read the cookie.
+
+        Secure                   Send it only over HTTPS.
+
+        SameSite                 Restricts cross-site sending; choose a policy compatible with your actual auth flow.
+
+        Path=/                   Defines where the browser sends it.
+
+        Max-Age/Expires          Makes the lifecycle explicit.
+
+
+ Important nuance
+ SameSite is useful CSRF defense-in-depth, but cookie/CSRF design depends on deployment topology. Do
+ not assume one attribute replaces all CSRF analysis. Also protect the session store, rotate/revoke
+ credentials appropriately, and avoid exposing tokens in logs.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                                      Page 8
+ Lesson 5 - Authentication middleware
+    Learning goal
+    Resolve the current user from the session for every protected request.
+
+   async function authMiddleware(req, res, next) {
+     try {
+       const sid = getSessionCredential(req);
+       if (!sid) return res.status(401).json({ error: 'Unauthorized' });
+
+         const session = await getSession(sid);
+         if (!session || session.expiresAt <= new Date())
+   +        return res.status(401).json({ error: 'Unauthorized' });
+
+         const liveSession = await refreshIfNeeded(session);
+         if (!liveSession) return res.status(401).json({ error: 'Unauthorized' });
+
+         const user = await getUser(liveSession.userId);
+         if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+         req.user = user;
+         next();
+       } catch (err) {
+         // Log safely; never substitute another identity.
+         return res.status(503).json({ error: 'Authentication unavailable' });
+       }
+   }
+
+
+ Why resolve it per request?
+ Servers handle many users at once. A global variable such as let currentUser can be overwritten by
+ another request. Request-scoped identity makes concurrent requests independent.
+
+
+ Protected route contract
+   app.get('/workspace/saved', authMiddleware, async (req, res) => {
+     const rows = await listSavedToolsForUser(req.user.id);
+     res.json(rows);
+   });
+
+    Rule
+    A protected handler may assume middleware established req.user only if routing guarantees that
+    middleware always runs before the handler. Keep that contract explicit and test it.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                   Page 9
+ Lesson 6 - Database ownership
+    Learning goal
+    Make ownership visible in the schema and efficient in queries.
+
+   users
+     id PRIMARY KEY
+
+   saved_tools
+     id      PRIMARY KEY
+     user_id FOREIGN KEY -> users.id
+     ...
+
+   search_history
+     id      PRIMARY KEY
+     user_id FOREIGN KEY -> users.id
+     ...
+
+ Every tenant-owned row needs an ownership relationship. In a user-scoped app that is usually userId. In
+ an organization-scoped app it is commonly tenantId or organizationId.
+
+
+ Constraints and indexes
+ Use foreign keys to protect referential integrity. Add indexes that support your actual access patterns,
+ commonly the tenant key and composite patterns involving tenant plus resource ID. Index choices are
+ performance decisions, so confirm them with your queries and database plans.
+
+
+ Why frontend filtering is not security
+ If the server returns all saved tools and React hides rows from other users, those rows have already
+ crossed the security boundary. They are visible to anyone inspecting the response. The database query
+ itself must be scoped.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                      Page 10
+ Lesson 7 - Safe CRUD
+    Learning goal
+    Apply the ownership rule mechanically to every database operation.
+
+
+ SELECT - only return this tenant's rows
+   // WRONG
+   await db.select().from(savedTools);
+
+   // RIGHT
+   await db.select().from(savedTools)
+     .where(eq(savedTools.userId, req.user.id));
+
+
+ INSERT - stamp ownership server-side
+   // WRONG: body can contain userId or unexpected fields
+   await db.insert(savedTools).values(req.body);
+
+   // RIGHT
+   const data = validatedInput(req.body); // schema excludes userId
+   await db.insert(savedTools).values({
+     ...data,
+     userId: req.user.id,
+   });
+
+    Spread-order trap
+    Do not write { userId: req.user.id, ...req.body }. A later userId property in req.body can overwrite the
+    trusted value. Better: validate an allow-list schema that does not contain ownership fields at all.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 11
+ Lesson 7 continued - UPDATE, DELETE,
+ UPSERT
+ UPDATE
+   await db.update(savedTools)
+     .set(validatedData)
+     .where(and(
+       eq(savedTools.id, rowId),
+       eq(savedTools.userId, req.user.id)
+     ));
+
+
+ DELETE
+   await db.delete(savedTools)
+     .where(and(
+       eq(savedTools.id, rowId),
+       eq(savedTools.userId, req.user.id)
+     ));
+
+
+ UPSERT
+ UPSERT combines lookup/conflict behavior with a write. Ensure the uniqueness/conflict boundary cannot
+ make one tenant collide with or update another tenant's row. Tenant identity normally needs to
+ participate in the relevant uniqueness and lookup design.
+
+
+ Checklist for any data method
+   • Where did the authenticated tenant identity come from?
+   • Does the WHERE/conflict condition contain that tenant?
+   • Can the payload write or replace ownership?
+   • Can a guessed resource ID bypass ownership?
+   • What happens when zero rows match?
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                Page 12
+ Lesson 8 - IDOR defense
+    Learning goal
+    Understand why knowing a resource ID must never grant access to it.
+
+ IDOR means Insecure Direct Object Reference. The bug appears when a server receives an object
+ identifier and operates on the object without proving the current user is allowed to touch it.
+
+
+ Vulnerable deletion
+   DELETE /saved-tools/42
+
+   // User A can try IDs until one belongs to B.
+   where(eq(savedTools.id, 42))
+
+
+ Tenant-scoped deletion
+   DELETE /saved-tools/42
+
+   where(and(
+     eq(savedTools.id, 42),
+     eq(savedTools.userId, req.user.id)
+   ))
+
+ If row 42 belongs to B while A is authenticated, the compound predicate matches zero rows. The
+ operation is safe even if A knows the exact ID.
+
+
+ UUIDs are not authorization
+ A hard-to-guess UUID can reduce accidental discovery, but secrecy of an identifier must not be the
+ access-control mechanism. IDs can leak through logs, links, analytics, screenshots, or other bugs.
+ Authorization must still validate ownership.
+
+
+ Single-record reads need the same rule
+   SELECT ...
+   WHERE id = :resourceId
+     AND user_id = :authenticatedUserId
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                    Page 13
+ Lesson 9 - Fail closed
+    Learning goal
+    Make authentication failures remove privileges instead of guessing an identity.
+
+
+ What “fail closed” means
+ When the server cannot establish a valid session/user relationship, access is denied or treated as
+ unauthenticated. The failure must never fall back to another user, a development user, or cached identity
+ from a previous request.
+
+        Situation                                    Safe outcome
+
+        No session credential                        401
+
+        Random/unknown session                       401
+
+        Expired/revoked session                      401 and clear/revoke as appropriate
+
+        Refresh fails                                Unauthenticated; do not keep stale identity by accident
+
+        Authenticated but forbidden                  403, or 404 when hiding existence is intentional
+
+        Auth infrastructure outage                   Controlled error; never substitute an identity
+
+
+ Logout
+   • Identify the current session.
+   • Delete or revoke the server-side session row.
+   • Clear the browser credential.
+   • Attempt provider logout when appropriate.
+   • Treat the app as logged out even if best-effort provider logout fails.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                             Page 14
+ Lesson 10 - Frontend UX is not authorization
+    Learning goal
+    Use the frontend to help users while assuming attackers can bypass it entirely.
+
+ A good frontend can show the current user, lock saved/history tabs until sign-in, open a login modal,
+ preserve an intended tool URL through login, and react to 401 responses. Those are useful experiences.
+ None is an authorization boundary.
+
+
+ Thought experiment: delete the frontend
+ Imagine an attacker sends raw HTTP requests with curl or a script. Would every protected API operation
+ still prevent cross-tenant access? If yes, your server owns authorization. If no, the frontend was
+ accidentally carrying security responsibility.
+
+
+ Safe endpoint shape
+   // Avoid identity parameter
+   GET /workspace/saved
+
+   // Server resolves owner
+   const ownerId = req.user.id;
+
+
+ Mobile
+ Native applications may use a secure platform credential store rather than browser cookies. Keep the
+ same principle: use an opaque session credential, resolve it server-side, handle 401 as session expiry,
+ and do not turn a client-supplied user identifier into authorization.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                       Page 15
+ Lesson 11 - Caches, queues, files, and
+ background jobs
+    Learning goal
+    Prevent leaks outside ordinary SQL route handlers.
+
+
+ Cache keys
+   BAD: project:42
+   GOOD: tenant:123:project:42
+
+ If identifiers are only unique inside a tenant, a cache key without tenant identity can return another
+ tenant's object. Tenant-aware namespaces should be the default.
+
+
+ Background jobs
+ A job that processes tenant-owned data needs explicit tenant context and should revalidate assumptions
+ at execution time where appropriate. Do not enqueue a bare resource ID and later query it globally.
+
+
+ Other isolation surfaces
+   • Object storage keys and access policies
+   • Search indexes and vector stores
+   • WebSocket rooms/subscriptions
+   • Temporary files
+   • Analytics exports
+   • AI conversation or retrieval state
+   • Server-side memoization
+   • Message queues and event payloads
+
+    Audit question
+    For every place data can be stored or retrieved, ask: “What prevents tenant A from naming or
+    colliding with tenant B's object here?”
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 16
+ Lesson 12 - Organization-level tenancy
+    Learning goal
+    Extend the same pattern from one user to teams without confusing identity, membership, and role.
+
+ In a team product, the authenticated identity is still a user, but the data owner may be an organization. A
+ membership table connects the two.
+
+   users
+     id
+
+   organizations
+     id
+
+   memberships
+     user_id
+     organization_id
+     role
+
+   projects
+     id
+     organization_id
+
+
+ Authorization now has two questions
+   • Who is the authenticated user? Resolve from session.
+   • Is that user a member of the target organization, and does their role permit this operation?
+ Do not treat a client-supplied organization ID as proof of membership. It may identify the organization the
+ user wants to operate within, but the server must verify membership/role before using that organization
+ as the authorized tenant boundary.
+
+
+ Defense in depth with PostgreSQL RLS
+ PostgreSQL Row-Level Security can provide another isolation layer for sensitive systems. It does not
+ remove the need to understand application authorization, connection/session context, migrations,
+ administrative bypasses, or testing. Treat it as reinforcement, not magic.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                      Page 17
+ Lesson 13 - Mechanical security audit
+    Learning goal
+    Inspect the codebase by operation type instead of hoping every route remembered the rule.
+
+
+ Search targets
+   SELECT
+   INSERT
+   UPDATE
+   DELETE
+   UPSERT
+   raw SQL
+   batch operations
+   background-job queries
+
+
+ Audit matrix
+        Operation              Required invariant
+
+        SELECT                 Tenant equals authenticated tenant
+
+        INSERT                 Ownership assigned server-side
+
+        UPDATE                 Resource ID + authenticated tenant
+
+        DELETE                 Resource ID + authenticated tenant
+
+        UPSERT                 Tenant participates in lookup/conflict boundary
+
+        Cache                  Tenant participates in key/namespace
+
+        Job                    Tenant context is explicit and appropriately revalidated
+
+
+ Repository/data-layer design
+   PREFER:
+   getProjectForUser(userId, projectId)
+   deleteProjectForUser(userId, projectId)
+
+   RISKIER GENERIC SHAPE:
+   getProject(projectId)
+   deleteProject(projectId)
+
+ Names and APIs that require tenant context make accidental unscoped access harder to express.
+ Centralization is especially useful when many routes share the same resources.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                               Page 18
+ Lesson 14 - Two-user isolation testing
+    Learning goal
+    Prove the system against a malicious authenticated user, not only the happy path.
+
+
+ Test fixture
+   User A owns A1
+   User B owns B1
+
+
+ Required proof
+   • A lists A1 but never B1.
+   • A reads A1; A cannot read B1 by exact ID.
+   • A updates A1; A cannot update B1 by exact ID.
+   • A deletes A1; A cannot delete B1 by exact ID.
+   • A cannot create a new row owned by B by injecting userId.
+   • A cannot change A1 ownership to B.
+   • Repeat the inverse checks as B.
+
+
+ Why two separate sessions matter
+ Do not simulate User B by changing a userId variable in one authenticated client. Use independent
+ authenticated contexts. The test should reproduce what real isolation relies on: two different
+ server-resolved sessions.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                   Page 19
+ Lesson 14 lab - hostile inputs and lifecycle
+ tests
+ Session cases
+   • No cookie/session credential
+   • Random invalid credential
+   • Expired credential
+   • Revoked/deleted session
+   • Token refresh failure
+   • Logout followed by reuse of old credential
+
+
+ Input attacks
+   • ?userId=B in the query string
+   • {"userId":"B"} in JSON
+   • Nested ownership field in an object
+   • B's exact resource ID in a URL
+   • B's ID in an update/delete operation
+
+
+ Concurrency and non-SQL surfaces
+   • Issue simultaneous A/B requests and verify responses never cross.
+   • Warm cache as A, then request corresponding resource as B.
+   • Run tenant-scoped background jobs for both users.
+   • Verify WebSocket/subscription channels are tenant-scoped if present.
+
+    Testing principle
+    A test that only proves A can use A's data is a functionality test. A multi-tenant security test must also
+    prove A cannot operate on known B data.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 20
+ Lesson 15 - A reliable build order
+    Learning goal
+    Implement the architecture so the safe path exists before tenant-owned features are added.
+
+ 1. Define the tenant boundary: user or organization. Write down which tables/resources are
+ tenant-owned.
+
+ 2. Integrate a maintained OIDC client and PKCE. Validate provider responses; map verified issuer/subject
+ to a local user.
+
+ 3. Create the server-side sessions table and opaque session credential lifecycle.
+
+ 4. Implement authentication middleware that resolves session -> user and fails closed.
+
+ 5. Create tenant ownership columns, foreign keys, constraints, and query-supporting indexes.
+
+ 6. Build tenant-aware repository/data-access functions before exposing CRUD endpoints.
+
+ 7. Define request schemas that exclude ownership fields from ordinary user-controlled payloads.
+
+ 8. Implement scoped SELECT, INSERT, UPDATE, DELETE, and UPSERT operations.
+
+ 9. Make caches, jobs, storage keys, subscriptions, and search tenant-aware.
+
+ 10. Implement frontend auth UX, remembering it is not the security boundary.
+
+ 11. Create two independent users and adversarial isolation tests.
+
+ 12. Mechanically audit every data operation and repeat the audit whenever tenant-owned features
+ change.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                   Page 21
+ Reference implementation skeleton
+   // Route: no userId parameter
+   app.post('/saved-tools', authMiddleware, async (req, res) => {
+     const input = SavedToolCreateSchema.parse(req.body); // excludes userId
+     const [row] = await db.insert(savedTools).values({
+       ...input,
+       userId: req.user.id,
+     }).returning();
+     res.status(201).json(row);
+   });
+
+   app.get('/saved-tools/:id', authMiddleware, async (req, res) => {
+     const [row] = await db.select().from(savedTools).where(and(
+       eq(savedTools.id, req.params.id),
+       eq(savedTools.userId, req.user.id)
+     ));
+     if (!row) return res.status(404).json({ error: 'Not found' });
+     res.json(row);
+   });
+
+   app.delete('/saved-tools/:id', authMiddleware, async (req, res) => {
+     const rows = await db.delete(savedTools).where(and(
+       eq(savedTools.id, req.params.id),
+       eq(savedTools.userId, req.user.id)
+     )).returning({ id: savedTools.id });
+     if (!rows.length) return res.status(404).json({ error: 'Not found' });
+     res.status(204).end();
+   });
+
+ This is a pattern illustration, not drop-in production code. Add your actual schema validation, error
+ handling, observability, transaction rules, CSRF strategy, database constraints, and framework-specific
+ typing.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                       Page 22
+ Debugging guide: if User A sees User B data
+ 1. Stop treating it as a UI bug
+ Inspect the API response and the underlying query first.
+
+
+ 2. Trace identity backward
+ For the leaking request, determine req.user, the session row, and the opaque credential. Confirm the
+ session maps to A.
+
+
+ 3. Inspect the data operation
+ Check whether the read/write contains the authenticated tenant predicate. Look at raw SQL if the ORM
+ output is unclear.
+
+
+ 4. Inspect indirect stores
+ Check cache keys, search results, queues, object storage, WebSockets, and background jobs.
+
+
+ 5. Reproduce with exact IDs
+ Use A's authenticated session to request B's known resource ID.
+
+
+ 6. Add a regression test
+ Once fixed, keep a two-user test that would fail if the leak returns.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                  Page 23
+ Beginner glossary
+ API: Server endpoints the client calls.
+
+ Authentication: Establishing who the requester is.
+
+ Authorization: Deciding whether that identity may perform an operation.
+
+ Cookie: Browser-managed value sent with matching HTTP requests.
+
+ CRUD: Create, Read, Update, Delete.
+
+ CSRF: An attack that causes a browser to send an unwanted authenticated request.
+
+ Foreign key: Database constraint relating one table row to another.
+
+ IDOR: Access-control bug where a direct object identifier is trusted without sufficient authorization.
+
+ Middleware: Code that runs in the request pipeline before/around route handlers.
+
+ OIDC: OpenID Connect, an identity layer built on OAuth 2.0.
+
+ Opaque credential: Random-looking credential whose meaning is resolved server-side.
+
+ PKCE: Proof Key for Code Exchange; binds an authorization request to code exchange.
+
+ RLS: PostgreSQL Row-Level Security, a database-level row access mechanism.
+
+ Session: Server-tracked authenticated login state.
+
+ Tenant: A user/organization boundary whose data must remain isolated.
+
+ Token: A security credential; provider tokens should be handled according to the protocol and protected
+ from exposure.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 24
+ Lesson 16 - Final assessment
+    Learning goal
+    Check that you can reason about the system without relying on memorized code.
+
+
+ Questions
+ 1. Why is GET /workspace/saved?userId=123 a dangerous API shape?
+
+ 2. Why does successful login not authorize access to project 42?
+
+ 3. Why should an INSERT schema exclude userId?
+
+ 4. Why is WHERE id = 42 insufficient for tenant-owned data?
+
+ 5. Why can a cache leak data even if SQL is correct?
+
+ 6. What should happen if session refresh fails?
+
+ 7. Why are UUIDs not a replacement for authorization?
+
+ 8. How do organization membership and identity differ?
+
+ 9. What two-user test would catch a delete IDOR?
+
+ 10. What is the final acceptance criterion for tenant isolation?
+
+
+ Answers
+ 1. The client can claim identity; tenant identity must come from authenticated server context.
+
+ 2. Authentication establishes who the user is; authorization must still prove access to that resource.
+
+ 3. It removes ownership from the writable client surface; the server stamps it from req.user.
+
+ 4. Any authenticated user who learns 42 could otherwise target it; combine resource and authenticated
+ owner/tenant.
+
+ 5. A non-tenant-aware key can return a value populated under another tenant.
+
+ 6. Fail closed: treat the request/session as unauthenticated and never substitute another identity.
+
+ 7. Identifiers can leak; authorization must independently prove ownership.
+
+ 8. Session identifies a user; membership/role determines that user's rights inside an organization.
+
+ 9. Authenticate as A, attempt deletion of known B1, verify B1 still exists and the operation is denied/not
+ found.
+
+ 10. A malicious client knowing another tenant's IDs still cannot read, create, modify, delete, or otherwise
+ affect that tenant's data.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                        Page 25
+ Production readiness checklist
+ □ Tenant identity is derived only from verified authentication/session context.
+
+ □ OIDC callback/token validation is delegated to a maintained library and required state/PKCE checks are
+ enforced.
+
+ □ Browser session credential is opaque; sensitive provider tokens remain server-side.
+
+ □ Cookie attributes and CSRF strategy match the actual deployment/auth flow.
+
+ □ Session expiration, refresh, revocation, and logout fail closed.
+
+ □ Every tenant-owned table has an explicit ownership relation.
+
+ □ SELECT queries are tenant-scoped before results leave the database.
+
+ □ INSERT ownership is stamped server-side after input validation.
+
+ □ UPDATE and DELETE use resource ID + authenticated tenant.
+
+ □ UPSERT uniqueness/conflict logic includes the tenant boundary where required.
+
+ □ Ownership fields cannot be changed by ordinary request payloads.
+
+ □ Caches, queues, jobs, storage, search, WebSockets, and AI/retrieval state are tenant-aware.
+
+ □ No global mutable current-user/current-tenant server variable exists.
+
+ □ Two independent users pass positive and negative isolation tests.
+
+ □ Known cross-tenant resource IDs do not bypass authorization.
+
+ □ Missing, invalid, expired, revoked, and refresh-failed sessions are tested.
+
+ □ A mechanical audit covers all tenant data operations, not just HTTP routes.
+
+ □ Security-sensitive logs do not expose session/provider tokens.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                  Page 26
+ The final acceptance criterion
+
+    Your system passes only when this is true
+    Given a fully malicious client and knowledge of another user's resource IDs, the client cannot read,
+    create, modify, delete, or otherwise affect data belonging to that other user because tenant identity
+    and ownership authorization are derived and enforced server-side.
+
+
+
+   Authenticate server-side
+           |
+           v
+   Derive user / tenant
+           |
+           v
+   Never trust client identity
+           |
+           v
+   Scope EVERY data operation
+           |
+           v
+   Test with two adversarial users
+
+
+ One sentence to remember
+ The client may name the resource; the server must determine and enforce the owner.
+
+
+ Source note
+ This class is a teaching expansion of the supplied “Multi-Tenant Application Security Instructions”
+ specification, preserving its central server-derived identity and tenant-scoped data-access rules while
+ adding beginner explanations, labs, implementation guidance, and verification exercises.
+
+
+
+
+Multi-Tenant Application Security - Beginner Class                                                     Page 27
+

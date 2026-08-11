@@ -1,0 +1,1333 @@
+================================================================================
+AION-BRAIN: CAPACITY-AWARE PROMPT OPTIMIZATION & INTELLIGENT DISPATCH SYSTEM
+Complete Implementation Guide — v1.0
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1. Architecture Overview
+2. Prompt Classification Engine
+3. Model Capacity Registry
+4. Decision Matrix & Routing Logic
+5. Implementation: lib/dispatch.js
+6. Implementation: lib/rewrite.js
+7. Implementation: server.js Integration
+8. SSE Event Flow
+9. Database Schema Additions
+10. Environment Configuration
+11. Real-World Routing Examples
+12. Circuit Breaker & Fallback Strategy
+13. Cost Tracking & ROI Measurement
+14. Deployment Checklist
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+OLD FLOW (Current):
+-------------------
+User Message → Brain Router → [OpenAI → A2E → Anthropic → Echo] → Answer
+
+NEW FLOW (Capacity-Aware Dispatch):
+-----------------------------------
+User Message → Brain Router
+              ↓
+         [CLASSIFY] — Local heuristic scoring (0ms, zero API cost)
+              ↓
+         [DISPATCH] — Pick rewrite + answer models based on profile
+              ↓
+         [REWRITE CHAIN] — Optimize prompt using cheapest qualified model
+              ↓
+         [ANSWER CHAIN] — Generate final answer using best-fit frontier model
+              ↓
+         SSE Stream → Frontend
+
+KEY PRINCIPLE:
+--------------
+"Right tool for the sub-task." The system reads the prompt like a project 
+manager estimating scope, then assigns the cheapest qualified model that can 
+actually complete that specific job without failing.
+
+================================================================================
+2. PROMPT CLASSIFICATION ENGINE
+================================================================================
+
+PURPOSE:
+--------
+Before any external API call, Brain scores the prompt locally using regex,
+heuristics, and token patterns. Zero latency, zero cost.
+
+FOUR CLASSIFICATION AXES:
+-------------------------
+
+Axis 1: COMPLEXITY (1-10)
+  Measures: Multi-step reasoning, dependencies, domain jargon, nested logic.
+  Heuristics:
+    - Counts transition words: "first, then, finally, additionally, moreover"
+    - Detects nested conditionals: "if X then Y else if Z then W"
+    - Domain keyword density: legal, medical, financial, cryptographic terms
+    - Question depth: "explain" (low) vs "derive, prove, architect" (high)
+
+  Scoring:
+    1-2: Greeting, single fact, casual chat
+    3-4: Simple question, one-step task
+    5-6: Multi-step analysis, comparison, basic code
+    7-8: Architectural reasoning, complex debugging, multi-file analysis
+    9-10: Formal proofs, novel algorithm design, cross-domain synthesis
+
+Axis 2: CONTEXT LOAD (0-10)
+  Measures: How much background knowledge is assumed or attached.
+  Heuristics:
+    - Message token count (approximate)
+    - Presence of URLs, file paths, repo names, commit hashes
+    - Attached document indicators: "see below", "attached", "refer to"
+    - Conversation history length (if multi-turn)
+
+  Scoring:
+    0-1: No external context, self-contained question
+    2-4: One URL or short code snippet
+    5-7: Multiple files, repo analysis, medium document
+    8-9: Large codebase, 50+ page document
+    10: 100K+ token document, entire codebase analysis
+
+Axis 3: OUTPUT RIGOR (0-10)
+  Measures: Structured output demands, precision requirements.
+  Heuristics:
+    - "return as JSON", "output table", "markdown list", "CSV"
+    - Type hints requested: "typed", "interface", "schema"
+    - Test cases requested: "unit tests", "edge cases", "100% coverage"
+    - Citation demands: "cite sources", "with references", "numbered"
+
+  Scoring:
+    0-2: Free-form text, conversational
+    3-5: Bullet points, basic structure
+    6-7: JSON, tables, formatted code blocks
+    8-9: Strict schemas, typed interfaces, validation rules
+    10: Formal specification, mathematical notation, proof format
+
+Axis 4: SAFETY SENSITIVITY (0-10)
+  Measures: Legal, medical, financial, or security implications.
+  Heuristics:
+    - Regex for liability terms: "advice", "recommend", "should I", "is it safe"
+    - Medical patterns: "diagnosis", "treatment", "prescription", "symptoms"
+    - Financial patterns: "invest", "portfolio", "tax", "legal entity"
+    - Security patterns: "exploit", "vulnerability", "bypass", "hack"
+    - PII detection: emails, SSNs, credit cards, API keys in prompt
+
+  Scoring:
+    0-2: General knowledge, creative, neutral
+    3-5: Technical guidance, coding help
+    6-7: Business strategy, general health info
+    8-9: Financial advice, legal interpretation, security audit
+    10: Medical diagnosis, legal representation, critical infrastructure
+
+CLASSIFICATION FUNCTION:
+------------------------
+```javascript
+// lib/classify.js
+function classifyPrompt(messages, history = []) {
+  const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
+  const text = lastUserMsg.toLowerCase();
+  const tokenEstimate = Math.ceil(lastUserMsg.length / 4); // Rough approximation
+
+  // --- COMPLEXITY ---
+  let complexity = 1;
+  const stepWords = ['first', 'then', 'next', 'finally', 'step', 'phase', 'stage'];
+  const deepWords = ['derive', 'prove', 'architect', 'synthesize', 'optimize', 'analyze deeply'];
+  const nestedIndicators = text.match(/if.*?then.*?else/g) || [];
+
+  complexity += stepWords.filter(w => text.includes(w)).length * 0.5;
+  complexity += deepWords.filter(w => text.includes(w)).length * 1.5;
+  complexity += nestedIndicators.length * 1.0;
+  complexity += (tokenEstimate > 500) ? 1 : 0;
+  complexity += (tokenEstimate > 2000) ? 1 : 0;
+  complexity = Math.min(10, Math.max(1, complexity));
+
+  // --- CONTEXT LOAD ---
+  let contextLoad = 0;
+  const urls = text.match(/https?:\/\/[^\s]+/g) || [];
+  const filePaths = text.match(/[\w-]+\/[\w-]+\/[^\s]+|\w+\.\w{2,4}/g) || [];
+  const repoPatterns = text.match(/github\.com\/[\w-]+\/[\w-]+/g) || [];
+
+  contextLoad += urls.length * 0.5;
+  contextLoad += filePaths.length * 0.3;
+  contextLoad += repoPatterns.length * 1.0;
+  contextLoad += (tokenEstimate > 1000) ? 1 : 0;
+  contextLoad += (tokenEstimate > 10000) ? 2 : 0;
+  contextLoad += (tokenEstimate > 50000) ? 3 : 0;
+  contextLoad += (history.length > 10) ? 1 : 0;
+  contextLoad = Math.min(10, Math.max(0, contextLoad));
+
+  // --- OUTPUT RIGOR ---
+  let outputRigor = 0;
+  const structureWords = ['json', 'table', 'csv', 'schema', 'interface', 'type', 'format'];
+  const testWords = ['unit test', 'edge case', 'coverage', 'assert', 'test suite'];
+  const citeWords = ['cite', 'reference', 'source', 'numbered', 'annotated'];
+
+  outputRigor += structureWords.filter(w => text.includes(w)).length * 1.0;
+  outputRigor += testWords.filter(w => text.includes(w)).length * 1.0;
+  outputRigor += citeWords.filter(w => text.includes(w)).length * 0.5;
+  outputRigor += text.includes('```') ? 1 : 0; // Code block requested
+  outputRigor = Math.min(10, Math.max(0, outputRigor));
+
+  // --- SAFETY SENSITIVITY ---
+  let safety = 0;
+  const medicalTerms = ['diagnosis', 'treatment', 'prescription', 'symptom', 'disease', 'medical'];
+  const financialTerms = ['invest', 'portfolio', 'tax', 'stock', 'option', 'derivative', 'legal entity'];
+  const securityTerms = ['exploit', 'vulnerability', 'bypass', 'hack', 'penetration', 'cve'];
+  const adviceTerms = ['should i', 'recommend', 'advice', 'is it safe', 'what do you think about'];
+  const piiPattern = /\d{3}-\d{2}-\d{4}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}/;
+
+  safety += medicalTerms.filter(w => text.includes(w)).length * 1.5;
+  safety += financialTerms.filter(w => text.includes(w)).length * 1.0;
+  safety += securityTerms.filter(w => text.includes(w)).length * 1.0;
+  safety += adviceTerms.filter(w => text.includes(w)).length * 0.5;
+  safety += piiPattern.test(lastUserMsg) ? 2 : 0;
+  safety = Math.min(10, Math.max(0, safety));
+
+  return {
+    complexity,
+    contextLoad,
+    outputRigor,
+    safety,
+    estimatedTokens: tokenEstimate,
+    rawText: lastUserMsg
+  };
+}
+```
+
+================================================================================
+3. MODEL CAPACITY REGISTRY
+================================================================================
+
+PURPOSE:
+--------
+Brain maintains a capability registry for every model it can call. Not just
+"NVIDIA" vs "OpenAI" — per-model profiles with strengths, weaknesses, context
+windows, and cost tiers.
+
+REGISTRY:
+---------
+
+┌─────────────────────────┬──────────┬──────────┬──────────────────────────────┬──────────────────────────────┬──────────┐
+│ Model                   │ Provider │ Context  │ Strengths                    │ Weaknesses                   │ Cost Tier│
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Llama 3.1 8B          │ NVIDIA   │ 128K     │ Blazing fast, cheap, good    │ No deep reasoning,           │ $        │
+│                         │          │          │ at formatting, simple        │ hallucinates on complex      │          │
+│                         │          │          │ rewrites                     │ logic, short context         │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Llama 3.1 70B         │ NVIDIA   │ 128K     │ Strong instruction following,│ Struggles with nuanced       │ $$       │
+│                         │          │          │ decent reasoning, fast       │ ambiguity, multi-hop logic   │          │
+│                         │          │          │ enough                       │                              │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Nemotron 70B          │ NVIDIA   │ 128K     │ Excellent at reward-modeling │ Not a generalist, tuned for  │ $$       │
+│                         │          │          │ style judgments, "is this    │ specific evaluation tasks    │          │
+│                         │          │          │ good?"                       │                              │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Mixtral 8x22B         │ NVIDIA   │ 64K      │ Good at multilingual, broad  │ Inconsistent output          │ $$$      │
+│                         │          │          │ knowledge, MoE routing       │ structure, can be verbose    │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Llama 3.1 405B        │ NVIDIA   │ 128K     │ Near-frontier reasoning,     │ Slower, expensive for a      │ $$$$     │
+│                         │          │          │ huge context, excellent at   │ "cheap" model, still not     │          │
+│                         │          │          │ complex decomposition        │ GPT-4o level                 │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ GPT-4o-mini           │ OpenAI   │ 128K     │ Fast, cheap frontier model,  │ Weaker than full GPT-4o on   │ $$       │
+│                         │          │          │ good structured output       │ nuance, coding edge cases    │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ GPT-4o                │ OpenAI   │ 128K     │ Best all-rounder, vision,   │ Expensive, can be verbose    │ $$$$$    │
+│                         │          │          │ tool use, excellent          │                              │          │
+│                         │          │          │ reasoning                    │                              │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Kimi K2.6             │ Moonshot │ 2M       │ Massive context (2M tokens), │ Slower on short tasks, less  │ $$$$$    │
+│                         │          │          │ best-in-class long-document  │ tool ecosystem than OpenAI   │          │
+│                         │          │          │ reasoning, nuanced           │                              │          │
+│                         │          │          │ instruction following        │                              │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Grok 3                │ xAI      │ 131K     │ Direct, no-nonsense, strong  │ Less nuanced on creative/    │ $$$$$    │
+│                         │          │          │ coding, real-time data       │ ambiguous tasks, smaller     │          │
+│                         │          │          │ awareness                    │ context than Kimi            │          │
+├─────────────────────────┼──────────┼──────────┼──────────────────────────────┼──────────────────────────────┼──────────┤
+│ Claude 3.5 Sonnet     │ Anthropic│ 200K     │ Best at following complex    │ Slower, can be overly        │ $$$$$    │
+│                         │          │          │ system prompts, excellent    │ cautious                     │          │
+│                         │          │          │ writing quality, safe        │                              │          │
+└─────────────────────────┴──────────┴──────────┴──────────────────────────────┴──────────────────────────────┴──────────┘
+
+================================================================================
+4. DECISION MATRIX & ROUTING LOGIC
+================================================================================
+
+REWRITE MODEL SELECTION:
+------------------------
+
+┌─────────────────────────────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
+│ Prompt Profile                              │ Rewrite Model                │ Reasoning                                │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Complexity < 3, Rigor < 3                   │ NONE (passthrough)           │ Not worth latency or cost                │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Complexity 3-5, Rigor 3-6                   │ Llama 3.1 70B                │ Sweet spot for 90% of rewrites           │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Complexity 6-8, Rigor 7-9                   │ Llama 3.1 405B               │ Needs decomposition before frontier      │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Context Load > 100K tokens                  │ Kimi K2.6                    │ Only model with context window           │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Needs self-critique / evaluation            │ Nemotron 70B                 │ Specialized for judgment, not generation │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Multi-language, broad knowledge             │ Mixtral 8x22B                │ MoE handles diverse domains              │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Simple greeting / tone shift                │ Llama 3.1 8B                 │ Fast, cheap, good enough                 │
+└─────────────────────────────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+ANSWER MODEL SELECTION:
+-----------------------
+
+┌─────────────────────────────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
+│ Prompt Profile                              │ Answer Model                 │ Reasoning                                │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Simple FAQ, <100 tokens expected            │ GPT-4o-mini                  │ Fast, cheap, good enough                 │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Standard reasoning, coding, analysis        │ GPT-4o                       │ Best all-rounder                         │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Context Load > 128K tokens                  │ Kimi K2.6                    │ Only model that can hold full context    │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Direct code execution, debugging            │ Grok 3                       │ No fluff, gets to the answer             │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Safety >= 8 (medical/legal/financial)       │ Claude 3.5 Sonnet            │ Most cautious, best safety guardrails    │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Real-time data needed                       │ Grok 3                       │ xAI has real-time web access             │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Long-document legal/medical review          │ Kimi K2.6                    │ 2M context + nuanced reasoning           │
+├─────────────────────────────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+│ Creative writing, complex system prompts    │ Claude 3.5 Sonnet            │ Best prose quality, prompt adherence     │
+└─────────────────────────────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+================================================================================
+5. IMPLEMENTATION: lib/dispatch.js
+================================================================================
+
+```javascript
+// lib/dispatch.js
+// Capacity-Aware Model Dispatch Engine for Aion-Brain
+
+const { classifyPrompt } = require('./classify');
+
+// ============================================================================
+// MODEL REGISTRY
+// ============================================================================
+
+const MODEL_REGISTRY = {
+  // --- NVIDIA Models (Rewrite Tier) ---
+  'nvidia-llama-8b': {
+    provider: 'nvidia',
+    model: 'meta/llama-3.1-8b-instruct',
+    maxContext: 128000,
+    strength: 'speed',
+    costTier: 1,
+    rewriteScore: 3,
+    answerScore: 1,
+    latencyMs: 200,
+  },
+  'nvidia-llama-70b': {
+    provider: 'nvidia',
+    model: 'meta/llama-3.1-70b-instruct',
+    maxContext: 128000,
+    strength: 'instruction',
+    costTier: 2,
+    rewriteScore: 8,
+    answerScore: 5,
+    latencyMs: 800,
+  },
+  'nvidia-nemotron-70b': {
+    provider: 'nvidia',
+    model: 'nvidia/llama-3.1-nemotron-70b-instruct',
+    maxContext: 128000,
+    strength: 'evaluation',
+    costTier: 2,
+    rewriteScore: 6,
+    answerScore: 4,
+    latencyMs: 900,
+  },
+  'nvidia-mixtral-8x22b': {
+    provider: 'nvidia',
+    model: 'mistralai/mixtral-8x22b-instruct-v0.1',
+    maxContext: 64000,
+    strength: 'multilingual',
+    costTier: 3,
+    rewriteScore: 5,
+    answerScore: 5,
+    latencyMs: 1000,
+  },
+  'nvidia-llama-405b': {
+    provider: 'nvidia',
+    model: 'meta/llama-3.1-405b-instruct',
+    maxContext: 128000,
+    strength: 'reasoning',
+    costTier: 4,
+    rewriteScore: 9,
+    answerScore: 8,
+    latencyMs: 1500,
+  },
+
+  // --- Frontier Models (Answer Tier) ---
+  'openai-gpt-4o-mini': {
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    maxContext: 128000,
+    strength: 'generalist',
+    costTier: 2,
+    rewriteScore: 5,
+    answerScore: 6,
+    latencyMs: 400,
+  },
+  'openai-gpt-4o': {
+    provider: 'openai',
+    model: 'gpt-4o',
+    maxContext: 128000,
+    strength: 'generalist',
+    costTier: 5,
+    rewriteScore: 7,
+    answerScore: 9,
+    latencyMs: 1200,
+  },
+  'kimi-k2.6': {
+    provider: 'kimi',
+    model: 'kimi-k2.6',
+    maxContext: 2000000,
+    strength: 'long-context',
+    costTier: 5,
+    rewriteScore: 9,
+    answerScore: 9,
+    latencyMs: 2000,
+  },
+  'xai-grok-3': {
+    provider: 'xai',
+    model: 'grok-3-beta',
+    maxContext: 131072,
+    strength: 'execution',
+    costTier: 5,
+    rewriteScore: 6,
+    answerScore: 8,
+    latencyMs: 1000,
+  },
+  'anthropic-claude-sonnet': {
+    provider: 'anthropic',
+    model: 'claude-3-5-sonnet-20241022',
+    maxContext: 200000,
+    strength: 'safety',
+    costTier: 5,
+    rewriteScore: 8,
+    answerScore: 9,
+    latencyMs: 1500,
+  },
+};
+
+// ============================================================================
+// DISPATCH ENGINE
+// ============================================================================
+
+function dispatch(messages, history = [], userPreferences = {}, headers = {}) {
+  // Step 1: Classify the prompt
+  const profile = classifyPrompt(messages, history);
+
+  // Step 2: Check user override headers
+  const forceRewrite = headers['x-optimize-prompt'] === 'true';
+  const forceNoRewrite = headers['x-optimize-prompt'] === 'false';
+  const preferredAnswer = headers['x-prefer-model']; // e.g., "kimi", "grok"
+
+  // Step 3: Filter viable models by context window
+  const viableModels = Object.entries(MODEL_REGISTRY)
+    .filter(([_, spec]) => spec.maxContext >= profile.estimatedTokens * 2); // 2x safety margin
+
+  // Step 4: Decide if rewrite is needed
+  let rewriteModel = null;
+
+  if (!forceNoRewrite && (forceRewrite || profile.complexity > 3 || profile.outputRigor > 4)) {
+    // Score each viable model for rewrite suitability
+    const rewriteCandidates = viableModels
+      .filter(([name, spec]) => {
+        // Only NVIDIA models + Kimi for rewrite (cheap/fast tier)
+        return spec.provider === 'nvidia' || (spec.provider === 'kimi' && profile.contextLoad > 8);
+      })
+      .map(([name, spec]) => ({
+        name,
+        spec,
+        score: calculateRewriteScore(spec, profile),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    if (rewriteCandidates.length > 0) {
+      rewriteModel = rewriteCandidates[0];
+    }
+  }
+
+  // Step 5: Select answer model
+  let answerCandidates = viableModels
+    .map(([name, spec]) => ({
+      name,
+      spec,
+      score: calculateAnswerScore(spec, profile, preferredAnswer),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  // If user prefers a specific provider, boost it
+  if (preferredAnswer) {
+    answerCandidates = answerCandidates.sort((a, b) => {
+      const aMatch = a.spec.provider === preferredAnswer ? 100 : 0;
+      const bMatch = b.spec.provider === preferredAnswer ? 100 : 0;
+      return (b.score + bMatch) - (a.score + aMatch);
+    });
+  }
+
+  const answerModel = answerCandidates[0];
+
+  // Step 6: Build reasoning log
+  const reasoning = [
+    `Profile: complexity=${profile.complexity}/10, context=${profile.contextLoad}/10,`,
+    `rigor=${profile.outputRigor}/10, safety=${profile.safety}/10,`,
+    `estimatedTokens=${profile.estimatedTokens}`,
+    `Rewrite: ${rewriteModel ? rewriteModel.name : 'NONE (passthrough)'}`,
+    `Answer: ${answerModel.name}`,
+    `Rationale: ${buildRationale(rewriteModel, answerModel, profile)}`,
+  ].join(' ');
+
+  return {
+    profile,
+    rewrite: rewriteModel ? {
+      modelKey: rewriteModel.name,
+      provider: rewriteModel.spec.provider,
+      model: rewriteModel.spec.model,
+      maxTokens: 1024,
+      temperature: 0.2,
+      timeout: 5000,
+    } : null,
+    answer: {
+      modelKey: answerModel.name,
+      provider: answerModel.spec.provider,
+      model: answerModel.spec.model,
+      maxTokens: estimateAnswerTokens(profile),
+      temperature: 0.7,
+      timeout: 60000,
+    },
+    reasoning,
+  };
+}
+
+// ============================================================================
+// SCORING FUNCTIONS
+// ============================================================================
+
+function calculateRewriteScore(spec, profile) {
+  let score = spec.rewriteScore * 10; // Base capability
+
+  // Context window penalty
+  if (profile.estimatedTokens > spec.maxContext * 0.5) {
+    score -= 50;
+  }
+
+  // Speed bonus for simple rewrites
+  if (profile.complexity <= 5) {
+    score += (10 - spec.latencyMs / 200); // Faster = better for simple stuff
+  }
+
+  // Reasoning bonus for complex rewrites
+  if (profile.complexity >= 7) {
+    score += spec.strength === 'reasoning' ? 20 : 0;
+    score += spec.strength === 'long-context' ? 15 : 0;
+  }
+
+  // Cost efficiency bonus
+  score += (6 - spec.costTier) * 3; // Cheaper is better for rewrite
+
+  return score;
+}
+
+function calculateAnswerScore(spec, profile, preferredAnswer) {
+  let score = spec.answerScore * 10; // Base capability
+
+  // Context window is king for long docs
+  if (profile.contextLoad >= 8) {
+    score += spec.maxContext > 500000 ? 30 : 0;
+    score += spec.strength === 'long-context' ? 25 : 0;
+  }
+
+  // Safety sensitivity
+  if (profile.safety >= 7) {
+    score += spec.strength === 'safety' ? 30 : 0;
+    score += spec.provider === 'anthropic' ? 15 : 0;
+  }
+
+  // Output rigor demands structured output
+  if (profile.outputRigor >= 8) {
+    score += spec.provider === 'openai' ? 10 : 0; // GPT-4o best at structured
+  }
+
+  // Direct execution preference
+  if (profile.complexity >= 6 && profile.outputRigor >= 7) {
+    score += spec.strength === 'execution' ? 15 : 0;
+  }
+
+  // Cost penalty for simple tasks
+  if (profile.complexity <= 4 && profile.outputRigor <= 4) {
+    score -= (spec.costTier - 2) * 5;
+  }
+
+  return score;
+}
+
+function buildRationale(rewrite, answer, profile) {
+  const parts = [];
+
+  if (!rewrite) {
+    parts.push('Prompt is simple; skipping rewrite to minimize latency.');
+  } else if (rewrite.spec.strength === 'long-context') {
+    parts.push(`Using ${rewrite.name} for rewrite because only it can handle ${profile.estimatedTokens} tokens.`);
+  } else {
+    parts.push(`Using ${rewrite.name} for rewrite (cost tier ${rewrite.spec.costTier}, ${rewrite.spec.latencyMs}ms).`);
+  }
+
+  if (answer.spec.strength === 'long-context') {
+    parts.push(`Using ${answer.name} for answer due to massive context requirement.`);
+  } else if (answer.spec.strength === 'safety') {
+    parts.push(`Using ${answer.name} for answer due to high safety sensitivity.`);
+  } else if (answer.spec.strength === 'execution') {
+    parts.push(`Using ${answer.name} for answer due to direct execution requirement.`);
+  } else {
+    parts.push(`Using ${answer.name} for answer (strength: ${answer.spec.strength}).`);
+  }
+
+  return parts.join(' ');
+}
+
+function estimateAnswerTokens(profile) {
+  // Heuristic: complex prompts need longer answers
+  const base = 512;
+  const complexityBonus = profile.complexity * 128;
+  const rigorBonus = profile.outputRigor * 64;
+  return Math.min(4096, base + complexityBonus + rigorBonus);
+}
+
+module.exports = { dispatch, MODEL_REGISTRY };
+```
+
+================================================================================
+6. IMPLEMENTATION: lib/rewrite.js
+================================================================================
+
+```javascript
+// lib/rewrite.js
+// Prompt Optimization Layer for Aion-Brain
+
+const SYSTEM_PROMPT_FOR_REWRITING = `
+You are an elite Prompt Engineer. Rewrite the user's raw prompt into a 
+highly effective, structured version that maximizes LLM comprehension and 
+output quality.
+
+Apply these optimization principles:
+1. ROLE ANCHORING — Start with: "You are a [senior/expert] [role]..."
+2. CONTEXT INJECTION — Add implicit background needed for correct reasoning.
+3. TASK DECOMPOSITION — Break complex requests into numbered steps.
+4. OUTPUT SCHEMA — Mandate exact format: JSON, markdown, tables, code blocks.
+5. CONSTRAINTS & GUARDRAILS — Define scope, length, tone, exclusions.
+6. FEW-SHOT FRAMING — Include brief example of desired output when helpful.
+7. REASONING VERIFICATION — Add self-check: "Before finalizing, verify..."
+8. AMBIGUITY ELIMINATION — Replace vague terms with precise actions.
+
+Rules:
+- Preserve original intent EXACTLY. Do not add new requirements.
+- Return ONLY the rewritten prompt. No explanations, no markdown fences.
+- The output must be immediately usable as a standalone user message.
+`;
+
+class PromptRewriter {
+  constructor(providerChain) {
+    this.providerChain = providerChain;
+    this.circuitBreaker = new Map(); // Per-rewrite-provider circuit state
+  }
+
+  async rewrite(messages, dispatchPlan, callId) {
+    if (!dispatchPlan.rewrite) {
+      return { messages, rewritten: false, model: null, latencyMs: 0 };
+    }
+
+    const rewriteConfig = dispatchPlan.rewrite;
+    const lastUserIndex = messages.findLastIndex(m => m.role === 'user');
+    if (lastUserIndex === -1) {
+      return { messages, rewritten: false, model: null, latencyMs: 0 };
+    }
+
+    const originalMessage = messages[lastUserIndex];
+    const startTime = Date.now();
+
+    try {
+      // Check circuit breaker
+      if (this.isCircuitOpen(rewriteConfig.modelKey)) {
+        console.log(`[${callId}] Circuit open for ${rewriteConfig.modelKey}, skipping rewrite.`);
+        return { messages, rewritten: false, model: null, latencyMs: 0, reason: 'circuit_open' };
+      }
+
+      // Call the rewrite model
+      const response = await this.providerChain.call(rewriteConfig.provider, {
+        model: rewriteConfig.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT_FOR_REWRITING },
+          { role: 'user', content: `Optimize this prompt for maximum LLM effectiveness:
+
+${originalMessage.content}` }
+        ],
+        max_tokens: rewriteConfig.maxTokens,
+        temperature: rewriteConfig.temperature,
+        timeout: rewriteConfig.timeout,
+      });
+
+      const latencyMs = Date.now() - startTime;
+
+      // Extract and clean the rewritten prompt
+      let optimized = response.choices[0].message.content.trim();
+
+      // Strip accidental markdown fences
+      if (optimized.startsWith('```')) {
+        const lines = optimized.split('
+');
+        if (lines[0].startsWith('```')) lines.shift();
+        if (lines.length && lines[lines.length - 1].startsWith('```')) lines.pop();
+        optimized = lines.join('
+').trim();
+      }
+
+      // Record success for circuit breaker
+      this.recordSuccess(rewriteConfig.modelKey);
+
+      // Build new message array with optimized content
+      const newMessages = [...messages];
+      newMessages[lastUserIndex] = {
+        ...originalMessage,
+        content: optimized,
+        _meta: {
+          rewritten: true,
+          original: originalMessage.content,
+          rewriteModel: rewriteConfig.modelKey,
+          rewriteLatencyMs: latencyMs,
+          rewriteTokens: response.usage?.total_tokens || 0,
+        }
+      };
+
+      return {
+        messages: newMessages,
+        rewritten: true,
+        model: rewriteConfig.modelKey,
+        latencyMs,
+        tokensUsed: response.usage?.total_tokens || 0,
+      };
+
+    } catch (err) {
+      const latencyMs = Date.now() - startTime;
+      this.recordFailure(rewriteConfig.modelKey);
+
+      console.error(`[${callId}] Rewrite failed for ${rewriteConfig.modelKey}: ${err.message}`);
+
+      return {
+        messages,
+        rewritten: false,
+        model: rewriteConfig.modelKey,
+        latencyMs,
+        error: err.message,
+        reason: 'rewrite_failed',
+      };
+    }
+  }
+
+  // Circuit breaker logic
+  isCircuitOpen(modelKey) {
+    const state = this.circuitBreaker.get(modelKey);
+    if (!state) return false;
+    if (state.failures < 3) return false;
+    const recoveryTime = 30000; // 30 seconds
+    if (Date.now() - state.lastFailure > recoveryTime) {
+      this.circuitBreaker.delete(modelKey);
+      return false;
+    }
+    return true;
+  }
+
+  recordSuccess(modelKey) {
+    this.circuitBreaker.delete(modelKey);
+  }
+
+  recordFailure(modelKey) {
+    const state = this.circuitBreaker.get(modelKey) || { failures: 0, lastFailure: 0 };
+    state.failures += 1;
+    state.lastFailure = Date.now();
+    this.circuitBreaker.set(modelKey, state);
+  }
+}
+
+module.exports = { PromptRewriter };
+```
+
+================================================================================
+7. IMPLEMENTATION: server.js Integration
+================================================================================
+
+```javascript
+// server.js — MODIFIED chat completions handler
+
+const { dispatch } = require('./lib/dispatch');
+const { PromptRewriter } = require('./lib/rewrite');
+const { store } = require('./lib/store'); // SQLite logger
+
+// Initialize rewriter with existing provider chain
+const rewriter = new PromptRewriter(router);
+
+// ============================================================================
+// CHAT COMPLETIONS ENDPOINT (MODIFIED)
+// ============================================================================
+
+app.post('/v1/chat/completions', authenticate, async (req, res) => {
+  const callId = generateCallId();
+  const startTime = Date.now();
+  const { messages, stream = false } = req.body;
+
+  try {
+    // --- STEP 1: CLASSIFY & DISPATCH ---
+    const dispatchPlan = dispatch(
+      messages,
+      req.conversationHistory || [],
+      req.userPreferences || {},
+      req.headers
+    );
+
+    console.log(`[${callId}] ${dispatchPlan.reasoning}`);
+
+    // --- STEP 2: REWRITE (if needed) ---
+    const rewriteResult = await rewriter.rewrite(messages, dispatchPlan, callId);
+
+    // Log rewrite call to SQLite
+    if (rewriteResult.rewritten) {
+      await store.logCall({
+        callId,
+        phase: 'rewrite',
+        provider: dispatchPlan.rewrite.provider,
+        model: dispatchPlan.rewrite.model,
+        latencyMs: rewriteResult.latencyMs,
+        tokensUsed: rewriteResult.tokensUsed,
+        costUsd: estimateCost(dispatchPlan.rewrite.modelKey, rewriteResult.tokensUsed),
+        success: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // --- STEP 3: ANSWER ---
+    const answerConfig = dispatchPlan.answer;
+    const optimizedMessages = rewriteResult.messages;
+
+    if (stream) {
+      // SSE streaming with optimize event
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      // Emit decision event
+      res.write(`data: ${JSON.stringify({
+        type: 'decision',
+        decision: { state: 'COMMIT', score: 0.95, checks: [] },
+        dispatch: {
+          rewrite: dispatchPlan.rewrite?.modelKey || null,
+          answer: dispatchPlan.answer.modelKey,
+          reasoning: dispatchPlan.reasoning,
+        }
+      })}
+
+`);
+
+      // Emit optimize event (NEW)
+      if (rewriteResult.rewritten) {
+        res.write(`data: ${JSON.stringify({
+          type: 'optimize',
+          rewrite: {
+            provider: dispatchPlan.rewrite.provider,
+            model: dispatchPlan.rewrite.model,
+            latencyMs: rewriteResult.latencyMs,
+            tokensUsed: rewriteResult.tokensUsed,
+          }
+        })}
+
+`);
+      }
+
+      // Stream the answer
+      const answerStart = Date.now();
+      const streamResponse = await router.streamChat(answerConfig.provider, {
+        model: answerConfig.model,
+        messages: optimizedMessages,
+        max_tokens: answerConfig.maxTokens,
+        temperature: answerConfig.temperature,
+        stream: true,
+      });
+
+      let answerTokens = 0;
+
+      res.write(`data: ${JSON.stringify({
+        type: 'attempt',
+        provider: answerConfig.provider,
+        model: answerConfig.model,
+        index: 1,
+      })}
+
+`);
+
+      res.write(`data: ${JSON.stringify({
+        type: 'open',
+        provider: answerConfig.provider,
+        model: answerConfig.model,
+      })}
+
+`);
+
+      for await (const chunk of streamResponse) {
+        const text = chunk.choices[0]?.delta?.content || '';
+        if (text) {
+          answerTokens += 1; // Approximate
+          res.write(`data: ${JSON.stringify({ type: 'delta', text })}
+
+`);
+        }
+      }
+
+      const answerLatency = Date.now() - answerStart;
+
+      // Emit done event with full metadata
+      res.write(`data: ${JSON.stringify({
+        type: 'done',
+        streaming: 'true',
+        provider: answerConfig.provider,
+        model: answerConfig.model,
+        latencyMs: answerLatency,
+        totalLatencyMs: Date.now() - startTime,
+        rewrite: rewriteResult.rewritten ? {
+          model: rewriteResult.model,
+          latencyMs: rewriteResult.latencyMs,
+          tokensUsed: rewriteResult.tokensUsed,
+        } : null,
+        finish_reason: 'stop',
+      })}
+
+`);
+
+      res.write('data: [DONE]
+
+');
+      res.end();
+
+      // Log answer call
+      await store.logCall({
+        callId,
+        phase: 'answer',
+        provider: answerConfig.provider,
+        model: answerConfig.model,
+        latencyMs: answerLatency,
+        tokensUsed: answerTokens,
+        costUsd: estimateCost(answerConfig.modelKey, answerTokens),
+        success: true,
+        timestamp: new Date().toISOString(),
+      });
+
+    } else {
+      // Non-streaming response
+      const answerStart = Date.now();
+      const response = await router.chat(answerConfig.provider, {
+        model: answerConfig.model,
+        messages: optimizedMessages,
+        max_tokens: answerConfig.maxTokens,
+        temperature: answerConfig.temperature,
+      });
+
+      const answerLatency = Date.now() - answerStart;
+
+      // Log answer call
+      await store.logCall({
+        callId,
+        phase: 'answer',
+        provider: answerConfig.provider,
+        model: answerConfig.model,
+        latencyMs: answerLatency,
+        tokensUsed: response.usage?.total_tokens || 0,
+        costUsd: estimateCost(answerConfig.modelKey, response.usage?.total_tokens || 0),
+        success: true,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Return response with dispatch metadata
+      res.json({
+        ...response,
+        _meta: {
+          callId,
+          dispatch: {
+            rewrite: dispatchPlan.rewrite?.modelKey || null,
+            answer: dispatchPlan.answer.modelKey,
+            reasoning: dispatchPlan.reasoning,
+          },
+          rewrite: rewriteResult.rewritten ? {
+            model: rewriteResult.model,
+            latencyMs: rewriteResult.latencyMs,
+            tokensUsed: rewriteResult.tokensUsed,
+          } : null,
+          totalLatencyMs: Date.now() - startTime,
+        }
+      });
+    }
+
+  } catch (err) {
+    console.error(`[${callId}] Error:`, err);
+    res.status(500).json({ error: err.message, callId });
+  }
+});
+
+// ============================================================================
+// COST ESTIMATION HELPER
+// ============================================================================
+
+const COST_RATES = {
+  'nvidia-llama-8b': { input: 0.00001, output: 0.00002 },
+  'nvidia-llama-70b': { input: 0.0001, output: 0.0002 },
+  'nvidia-llama-405b': { input: 0.0005, output: 0.001 },
+  'openai-gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+  'openai-gpt-4o': { input: 0.0025, output: 0.01 },
+  'kimi-k2.6': { input: 0.002, output: 0.008 },
+  'xai-grok-3': { input: 0.003, output: 0.015 },
+  'anthropic-claude-sonnet': { input: 0.003, output: 0.015 },
+};
+
+function estimateCost(modelKey, tokens) {
+  const rate = COST_RATES[modelKey];
+  if (!rate) return 0;
+  // Assume 2:1 output:input ratio for estimation
+  const inputTokens = tokens * 0.33;
+  const outputTokens = tokens * 0.67;
+  return (inputTokens / 1000 * rate.input) + (outputTokens / 1000 * rate.output);
+}
+
+function generateCallId() {
+  return `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+```
+
+================================================================================
+8. SSE EVENT FLOW
+================================================================================
+
+OLD EVENT SEQUENCE:
+-------------------
+decision → attempt → open → delta → delta → ... → done → [DONE]
+
+NEW EVENT SEQUENCE (with optimizer):
+------------------------------------
+decision → optimize → attempt → open → delta → delta → ... → done → [DONE]
+
+EVENT DETAILS:
+--------------
+
+1. decision
+   {
+     "type": "decision",
+     "decision": { "state": "COMMIT", "score": 0.95, "checks": [] },
+     "dispatch": {
+       "rewrite": "nvidia-llama-70b",
+       "answer": "openai-gpt-4o",
+       "reasoning": "Profile: complexity=6/10... Using nvidia-llama-70b for rewrite... Using openai-gpt-4o for answer..."
+     }
+   }
+
+2. optimize (NEW EVENT)
+   {
+     "type": "optimize",
+     "rewrite": {
+       "provider": "nvidia",
+       "model": "meta/llama-3.1-70b-instruct",
+       "latencyMs": 450,
+       "tokensUsed": 156
+     }
+   }
+   → Frontend can show: "Enhancing your prompt..."
+
+3. attempt
+   {
+     "type": "attempt",
+     "provider": "openai",
+     "model": "gpt-4o",
+     "index": 1
+   }
+
+4. open
+   {
+     "type": "open",
+     "provider": "openai",
+     "model": "gpt-4o"
+   }
+
+5. delta (repeated)
+   {
+     "type": "delta",
+     "text": "..."
+   }
+
+6. done
+   {
+     "type": "done",
+     "streaming": "true",
+     "provider": "openai",
+     "model": "gpt-4o",
+     "latencyMs": 1200,
+     "totalLatencyMs": 1650,
+     "rewrite": {
+       "model": "nvidia-llama-70b",
+       "latencyMs": 450,
+       "tokensUsed": 156
+     },
+     "finish_reason": "stop"
+   }
+
+7. [DONE]
+   data: [DONE]
+
+================================================================================
+9. DATABASE SCHEMA ADDITIONS
+================================================================================
+
+SQLite schema modification for the call log table:
+
+```sql
+-- Add 'phase' column to existing calls table
+ALTER TABLE calls ADD COLUMN phase TEXT DEFAULT 'answer';
+
+-- Add 'call_id' column to group rewrite + answer together
+ALTER TABLE calls ADD COLUMN call_id TEXT;
+
+-- Create index for fast aggregation
+CREATE INDEX idx_calls_call_id ON calls(call_id);
+CREATE INDEX idx_calls_phase ON calls(phase);
+
+-- New table: dispatch_decisions (for A/B testing and model performance)
+CREATE TABLE dispatch_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  complexity INTEGER,
+  context_load INTEGER,
+  output_rigor INTEGER,
+  safety INTEGER,
+  rewrite_model TEXT,
+  answer_model TEXT,
+  reasoning TEXT,
+  user_override INTEGER DEFAULT 0,
+  FOREIGN KEY (call_id) REFERENCES calls(call_id)
+);
+
+-- New table: cost_savings (aggregated daily)
+CREATE TABLE cost_savings (
+  date TEXT PRIMARY KEY,
+  total_calls INTEGER,
+  optimized_calls INTEGER,
+  rewrite_cost_usd REAL,
+  answer_cost_usd REAL,
+  estimated_baseline_cost_usd REAL,
+  savings_usd REAL,
+  savings_percent REAL
+);
+```
+
+================================================================================
+10. ENVIRONMENT CONFIGURATION
+================================================================================
+
+Required environment variables for Aion-Brain:
+
+```bash
+# --- EXISTING (keep as-is) ---
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+A2E_API_KEY=...
+
+# --- NEW: NVIDIA NIM Credentials ---
+NVIDIA_API_KEY=nvapi-...
+
+# --- NEW: Rewrite Configuration ---
+REWRITE_ENABLED=true                    # Master switch
+REWRITE_DEFAULT_MODEL=nvidia-llama-70b  # Fallback if dispatch fails
+REWRITE_TIMEOUT_MS=5000                 # Fail fast threshold
+REWRITE_CIRCUIT_FAILURES=3              # Open circuit after N failures
+REWRITE_CIRCUIT_RECOVERY_MS=30000       # Recovery time
+
+# --- NEW: Moonshot / Kimi (for long-context rewrites) ---
+MOONSHOT_API_KEY=sk-...
+
+# --- NEW: Cost Tracking ---
+COST_TRACKING_ENABLED=true
+COST_BASELINE_MODEL=openai-gpt-4o       # For savings comparison
+```
+
+================================================================================
+11. REAL-WORLD ROUTING EXAMPLES
+================================================================================
+
+EXAMPLE 1: Simple Greeting
+--------------------------
+User: "hi"
+Profile: complexity=1, context=0, rigor=0, safety=0
+Dispatch: Rewrite: NONE | Answer: openai-gpt-4o-mini
+Reasoning: "Prompt is simple; skipping rewrite to minimize latency. Using openai-gpt-4o-mini for answer (fast, cheap)."
+Cost: $0.0001 (no rewrite overhead)
+
+EXAMPLE 2: Standard Code Request
+--------------------------------
+User: "Write a Python script that scrapes a website"
+Profile: complexity=5, context=2, rigor=6, safety=2
+Dispatch: Rewrite: nvidia-llama-70b | Answer: xai-grok-3
+Reasoning: "Using nvidia-llama-70b for rewrite (cost tier 2, 800ms). Using xai-grok-3 for answer due to direct execution requirement."
+Rewrite output: "You are a senior Python developer. Write a production-ready web scraper using requests and BeautifulSoup. Include error handling, rate limiting, user-agent rotation, and output the data as a JSON file. Handle 403/404 status codes gracefully."
+Cost: Rewrite $0.0002 + Answer $0.003 = $0.0032
+Baseline (no rewrite): $0.005 (GPT-4o handles ambiguous prompt, uses more tokens)
+Savings: ~36%
+
+EXAMPLE 3: Complex Security Audit
+---------------------------------
+User: "Analyze my 50-file repo for security vulnerabilities, output as JSON with severity scores"
+Profile: complexity=9, context=8, rigor=10, safety=9
+Dispatch: Rewrite: nvidia-llama-405b | Answer: anthropic-claude-sonnet
+Reasoning: "Using nvidia-llama-405b for rewrite (cost tier 4, 1500ms). Needs decomposition before frontier. Using anthropic-claude-sonnet for answer due to high safety sensitivity."
+Rewrite output: "You are a senior application security engineer performing a comprehensive audit. Analyze the provided codebase (50 files) and identify all security vulnerabilities. For each finding, provide: 1) CVE/CWE classification, 2) severity score (1-10), 3) affected file and line number, 4) remediation steps. Output strictly as JSON array with schema: [{cve, severity, file, line, description, fix}]. Exclude false positives. Verify each finding against OWASP Top 10 2021 before including."
+Cost: Rewrite $0.001 + Answer $0.08 = $0.081
+Baseline (no rewrite): $0.12 (Claude asks clarifying questions, uses more tokens)
+Savings: ~33%
+
+EXAMPLE 4: Massive Legal Document
+---------------------------------
+User: "Summarize this 150-page legal contract and flag termination clauses" [attached: 300K tokens]
+Profile: complexity=8, context=10, rigor=7, safety=9
+Dispatch: Rewrite: kimi-k2.6 | Answer: kimi-k2.6
+Reasoning: "Using kimi-k2.6 for rewrite because only it can handle 300K tokens. Using kimi-k2.6 for answer due to massive context requirement."
+Note: NVIDIA models cannot handle 300K tokens. Kimi is the ONLY viable option for both rewrite and answer.
+Cost: Rewrite $0.01 + Answer $0.15 = $0.16
+Baseline (impossible without Kimi — other models would truncate or fail)
+
+EXAMPLE 5: Medical Diagnosis Request
+------------------------------------
+User: "I have chest pain and shortness of breath, what should I do?"
+Profile: complexity=4, context=2, rigor=3, safety=10
+Dispatch: Rewrite: nvidia-llama-70b | Answer: anthropic-claude-sonnet
+Reasoning: "Using nvidia-llama-70b for rewrite. Using anthropic-claude-sonnet for answer due to high safety sensitivity (medical)."
+Rewrite output: "You are a medical information assistant. A user reports chest pain and shortness of breath. Provide general educational information about possible causes while emphasizing that this requires immediate emergency medical attention. Include a clear disclaimer that you are not a doctor and this is not medical advice. List common causes (cardiac, pulmonary, anxiety) with their typical accompanying symptoms. Do not diagnose."
+Cost: Rewrite $0.0002 + Answer $0.002 = $0.0022
+Baseline: Same cost, but Claude handles the safety guardrails better than GPT-4o
+
+EXAMPLE 6: Real-Time Data Query
+-------------------------------
+User: "What happened in the stock market today?"
+Profile: complexity=3, context=1, rigor=2, safety=3
+Dispatch: Rewrite: NONE | Answer: xai-grok-3
+Reasoning: "Prompt is simple; skipping rewrite. Using xai-grok-3 for answer due to real-time data requirement."
+Note: No rewrite needed. Grok is chosen specifically for real-time web access.
+Cost: $0.001 (no rewrite)
+
+================================================================================
+12. CIRCUIT BREAKER & FALLBACK STRATEGY
+================================================================================
+
+REWRITE CIRCUIT BREAKER:
+------------------------
+- Failure threshold: 3 consecutive failures
+- Recovery time: 30 seconds
+- Fallback behavior: Return raw prompt (passthrough)
+- The answer chain proceeds normally regardless
+
+ANSWER CIRCUIT BREAKER (existing):
+----------------------------------
+- OpenAI fails → try A2E → try Anthropic → Echo (mock)
+- Unaffected by rewrite circuit state
+
+CASCADING FAILURE SCENARIOS:
+----------------------------
+
+Scenario A: NVIDIA is down
+  Rewrite: Circuit opens after 3 failures → passthrough
+  Answer: Normal chain (OpenAI → A2E → Anthropic → Echo)
+  User impact: Slightly less polished answers, zero downtime
+
+Scenario B: OpenAI is down
+  Rewrite: NVIDIA works normally
+  Answer: Fails over to A2E or Anthropic
+  User impact: Different answer quality, but prompt is still optimized
+
+Scenario C: Both NVIDIA and OpenAI are down
+  Rewrite: Circuit open → passthrough
+  Answer: Fails over to Anthropic or Echo
+  User impact: Raw prompt to backup provider. Still functional.
+
+Scenario D: Kimi is chosen for rewrite (long context) but Kimi is down
+  Rewrite: Falls back to Llama 405B (if context fits) or passthrough
+  Answer: Falls back to GPT-4o (if context fits) or error
+  User impact: If context > 128K and Kimi is down, system returns error:
+  "This request requires a model with >128K context window, which is currently unavailable."
+
+================================================================================
+13. COST TRACKING & ROI MEASUREMENT
+================================================================================
+
+HOW SAVINGS ARE CALCULATED:
+---------------------------
+
+Baseline assumption: Without the optimizer, ALL prompts go directly to the 
+answer model (usually GPT-4o or the most expensive suitable model).
+
+With optimizer:
+  Total cost = Rewrite cost + Answer cost
+
+Savings = Baseline cost - Total cost
+
+The SQLite log captures both, so you can query:
+
+```sql
+-- Daily savings report
+SELECT 
+  date,
+  COUNT(*) as total_calls,
+  SUM(CASE WHEN phase = 'rewrite' THEN cost_usd ELSE 0 END) as rewrite_cost,
+  SUM(CASE WHEN phase = 'answer' THEN cost_usd ELSE 0 END) as answer_cost,
+  SUM(estimated_baseline_cost_usd) as baseline_cost,
+  SUM(estimated_baseline_cost_usd) - SUM(cost_usd) as savings_usd,
+  ROUND((SUM(estimated_baseline_cost_usd) - SUM(cost_usd)) / SUM(estimated_baseline_cost_usd) * 100, 2) as savings_percent
+FROM calls
+LEFT JOIN cost_savings USING (date)
+GROUP BY date
+ORDER BY date DESC;
+```
+
+EXPECTED ROI:
+-------------
+- Simple prompts (30% of traffic): No rewrite → 0% overhead, 0% savings
+- Standard prompts (50% of traffic): 70B rewrite + GPT-4o answer → ~25-40% savings
+- Complex prompts (15% of traffic): 405B rewrite + frontier answer → ~15-30% savings
+- Long-context (5% of traffic): Kimi rewrite + Kimi answer → Impossible without, so "infinite" savings vs failure
+
+Overall expected savings: 20-35% on total LLM spend
+
+================================================================================
+14. DEPLOYMENT CHECKLIST
+================================================================================
+
+[ ] 1. Add NVIDIA_API_KEY to Brain environment
+[ ] 2. Add MOONSHOT_API_KEY (if using Kimi for long-context rewrites)
+[ ] 3. Set REWRITE_ENABLED=true
+[ ] 4. Deploy new files: lib/classify.js, lib/dispatch.js, lib/rewrite.js
+[ ] 5. Modify server.js chat completions handler
+[ ] 6. Run database migration (add phase, call_id columns)
+[ ] 7. Update SSE event parser in frontend to handle "optimize" event
+[ ] 8. Test with x-optimize-prompt: true vs false headers
+[ ] 9. Monitor /stats endpoint for rewrite success rates
+[ ] 10. A/B test: 50% traffic with optimizer, 50% without
+[ ] 11. Review cost_savings table after 1 week
+[ ] 12. Tune classification thresholds based on real traffic patterns
+[ ] 13. Add user-facing "Enhance my prompt" toggle in frontend
+[ ] 14. Document the new SSE optimize event for API consumers
+
+================================================================================
+END OF DOCUMENT
+================================================================================

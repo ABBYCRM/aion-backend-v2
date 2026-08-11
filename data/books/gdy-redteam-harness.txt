@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# GDY multi-tenant red-team test
+# Asserts: A's data is invisible to B, B's data is invisible to A,
+# cross-user DELETE is blocked at the SQL layer, and req.body.userId
+# injection cannot redirect ownership.
+#
+# Prereqs: two `sid` cookies from two DIFFERENT Google identities
+# that have already logged in. Export them as A_SID and B_SID before
+# running this script.
+set -euo pipefail
+
+URL="${URL:-https://gdy-tool-directory-a6hzh.ondigitalocean.app}"
+A="Cookie: sid=${A_SID:?must export A_SID}"
+B="Cookie: sid=${B_SID:?must export B_SID}"
+
+pass=0
+fail=0
+section() { printf "\n\033[1m=== %s ===\033[0m\n" "$*"; }
+ok()     { printf "  \033[32m✓\033[0m %s\n" "$*"; pass=$((pass+1)); }
+bad()    { printf "  \033[31m✗\033[0m %s\n" "$*"; fail=$((fail+1)); }
+
+# JSON helper (uses node so we don't need jq)
+jget() { node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));const v=d$1;process.stdout.write(typeof v==='string'?v:JSON.stringify(v))" < "$2"; }
+
+# ─────────────────────────────────────────────────────────────
+section "0. Identity resolution (no client-supplied userId leak)"
+# /api/auth/user should return distinct Google `sub` IDs for A and B.
+# If they collide, two different Google users mapped to the same DB row
+# — that would be a catastrophic identity collision.
+A_USER=$(curl -sS -H "$A" "$URL/api/auth/user")
+B_USER=$(curl -sS -H "$B" "$URL/api/auth/user")
+A_SUB=$(jget ".user.id" <<<"$A_USER")
+B_SUB=$(jget ".user.id" <<<"$B_USER")
+A_EMAIL=$(jget ".user.email" <<<"$A_USER")
+B_EMAIL=$(jget ".user.email" <<<"$B_USER")
+echo "  A: $A_EMAIL (sub=$A_SUB)"
+echo "  B: $B_EMAIL (sub=$B_SUB)"
+[ -n "$A_SUB" ] && [ -n "$B_SUB" ] && [ "$A_SUB" != "$B_SUB" ] && ok "A and B have distinct Google sub IDs" || bad "A and B have SAME or missing sub ID — identity collision!"
+
+# ─────────────────────────────────────────────────────────────
+section "1. Each user can save their own tool"
+TS=$(date +%s)
+A_TOOL="https://redteam.example.com/a-$TS"
+B_TOOL="https://redteam.example.com/b-$TS"
+A_SAVE=$(curl -sS -H "$A" -H "Content-Type: application/json" -X POST \
+  -d "{\"toolUrl\":\"$A_TOOL\",\"toolName\":\"A's tool $TS\",\"categoryId\":\"01\",\"categoryLabel\":\"Test A\"}" \
+  "$URL/api/workspace/saved")
+A_ID=$(jget ".id" <<<"$A_SAVE")
+[ -n "$A_ID" ] && [ "$A_ID" != "null" ] && ok "A saved a tool (id=$A_ID)" || { bad "A failed to save: $A_SAVE"; exit 1; }
+
+B_SAVE=$(curl -sS -H "$B" -H "Content-Type: application/json" -X POST \
+  -d "{\"toolUrl\":\"$B_TOOL\",\"toolName\":\"B's tool $TS\",\"categoryId\":\"01\",\"categoryLabel\":\"Test B\"}" \
+  "$URL/api/workspace/saved")
+B_ID=$(jget ".id" <<<"$B_SAVE")
+[ -n "$B_ID" ] && [ "$B_ID" != "null" ] && ok "B saved a tool (id=$B_ID)" || { bad "B failed to save: $B_SAVE"; exit 1; }
+
+# ─────────────────────────────────────────────────────────────
+section "2. Read isolation: A's list contains A's tool, NOT B's"
+A_LIST=$(curl -sS -H "$A" "$URL/api/workspace/saved")
+echo "$A_LIST" > /tmp/A_list.json
+echo "$B_LIST" > /tmp/B_list.json
+A_HAS_A=$(jget ".saved.map(t=>t.toolUrl).includes('$A_TOOL')" <<<"$A_LIST")
+A_HAS_B=$(jget ".saved.map(t=>t.toolUrl).includes('$B_TOOL')" <<<"$A_LIST")
+[ "$A_HAS_A" = "true" ] && ok "A's list contains A's tool" || bad "A's list MISSING A's tool"
+[ "$A_HAS_B" = "false" ] && ok "A's list does NOT contain B's tool" || bad "A's list LEAKS B's tool — CONTAMINATION"
+
+B_LIST=$(curl -sS -H "$B" "$URL/api/workspace/saved")
+B_HAS_A=$(jget ".saved.map(t=>t.toolUrl).includes('$A_TOOL')" <<<"$B_LIST")
+B_HAS_B=$(jget ".saved.map(t=>t.toolUrl).includes('$B_TOOL')" <<<"$B_LIST")
+[ "$B_HAS_B" = "true" ] && ok "B's list contains B's tool" || bad "B's list MISSING B's tool"
+[ "$B_HAS_A" = "false" ] && ok "B's list does NOT contain A's tool" || bad "B's list LEAKS A's tool — CONTAMINATION"
+
+# ─────────────────────────────────────────────────────────────
+section "3. IDOR: B tries to DELETE A's row — should 404 (zero rows match)"
+# Compound WHERE: id = ? AND userId = ? — the second clause must reject.
+B_DELETE=$(curl -sS -o /dev/null -w "%{http_code}" -H "$B" -X DELETE \
+  "$URL/api/workspace/saved/$A_ID")
+[ "$B_DELETE" = "404" ] && ok "B's DELETE on A's row returned 404 (IDOR guard held)" || bad "B's DELETE on A's row returned $B_DELETE — IDOR BREACH"
+
+# Verify A's row is still there
+A_RECHECK=$(curl -sS -H "$A" "$URL/api/workspace/saved")
+A_STILL_THERE=$(jget ".saved.map(t=>t.toolUrl).includes('$A_TOOL')" <<<"$A_RECHECK")
+[ "$A_STILL_THERE" = "true" ] && ok "A's row survived B's attack (DB row NOT deleted)" || bad "A's row was DELETED by B's attack — IDOR BREACH"
+
+# ─────────────────────────────────────────────────────────────
+section "4. Ownership injection: A sends userId=B in the body — should be IGNORED"
+# A tries to create a tool "owned by" B by smuggling userId in the POST body.
+# The server MUST stamp req.user.id (A) and ignore the body's userId.
+INJECT_TOOL="https://redteam.example.com/injected-$TS"
+INJECT=$(curl -sS -H "$A" -H "Content-Type: application/json" -X POST \
+  -d "{\"userId\":\"$B_SUB\",\"toolUrl\":\"$INJECT_TOOL\",\"toolName\":\"Injected by A as B\",\"categoryId\":\"01\",\"categoryLabel\":\"Inj\"}" \
+  "$URL/api/workspace/saved")
+INJECT_ID=$(jget ".id" <<<"$INJECT")
+[ -n "$INJECT_ID" ] && [ "$INJECT_ID" != "null" ] && ok "POST with userId in body returned 200 (server didn't reject upfront)" || bad "POST failed: $INJECT"
+
+# Now check: is the injected tool in A's list or B's list?
+A_INJ=$(jget ".saved.map(t=>t.toolUrl).includes('$INJECT_TOOL')" <<<"$(curl -sS -H "$A" "$URL/api/workspace/saved")")
+B_INJ=$(jget ".saved.map(t=>t.toolUrl).includes('$INJECT_TOOL')" <<<"$(curl -sS -H "$B" "$URL/api/workspace/saved")")
+[ "$A_INJ" = "true" ] && ok "Injected tool landed in A's list (server stamped A as owner — B's userId was IGNORED)" || bad "Injected tool MISSING from A's list"
+[ "$B_INJ" = "false" ] && ok "Injected tool did NOT land in B's list (B was NOT made owner)" || bad "B became owner of A's row via body.userId — CRITICAL BREACH"
+
+# ─────────────────────────────────────────────────────────────
+section "5. Cleanup: delete the test rows"
+curl -sS -o /dev/null -H "$A" -X DELETE "$URL/api/workspace/saved/$A_ID" && ok "A deleted own row"
+curl -sS -o /dev/null -H "$A" -X DELETE "$URL/api/workspace/saved/$INJECT_ID" && ok "A deleted injected row"
+curl -sS -o /dev/null -H "$B" -X DELETE "$URL/api/workspace/saved/$B_ID" && ok "B deleted own row"
+
+# ─────────────────────────────────────────────────────────────
+section "Summary"
+echo "  passed: $pass"
+echo "  failed: $fail"
+[ "$fail" = "0" ] && printf "\n  \033[32m🛡  ALL CHECKS PASSED — multi-tenant wall holds.\033[0m\n\n" \
+                || printf "\n  \033[31m💥 RED TEAM FOUND HOLES — review above.\033[0m\n\n"
+exit "$fail"

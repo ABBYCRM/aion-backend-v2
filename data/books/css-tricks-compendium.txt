@@ -1,0 +1,1414 @@
+CSS TRICKS COMPENDIUM
+120 copy-ready patterns across 12 practical sections
+========================================================================
+
+How to use
+----------
+Copy the smallest pattern that solves your problem, rename selectors to
+fit your project, and test the result in the browsers your product supports.
+Modern features are intentionally isolated so they can be progressively
+enhanced or guarded with @supports when appropriate.
+
+Reference note
+--------------
+Pattern 001 reconstructs the rotating conic-gradient idea shown in the
+provided screenshot and registers the animated angle with @property.
+
+
+SECTION 01 - GLOW, GRADIENTS & BORDERS
+========================================================================
+Build high-impact surfaces with gradients, shadows, and compositing while keeping the HTML simple.
+
+001. Rotating conic-gradient glow border
+------------------------------------------------------------------------
+Why it works: Register an angle custom property so the gradient can interpolate smoothly, then animate it around a transparent border.
+
+CSS
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+.glow-card {
+  border: 2px solid transparent;
+  background: linear-gradient(#111827, #111827) padding-box,
+    conic-gradient(from var(--angle), #22d3ee, #a78bfa,
+      #f472b6, #22d3ee) border-box;
+  animation: spin 3s linear infinite;
+}
+@keyframes spin { to { --angle: 1turn; } }
+
+002. Gradient border without a pseudo-element
+------------------------------------------------------------------------
+Why it works: Two background layers let one paint the content box and the other paint only the transparent border box.
+
+CSS
+.panel {
+  border: 3px solid transparent;
+  border-radius: 1rem;
+  background: linear-gradient(#fff, #fff) padding-box,
+    linear-gradient(135deg, #06b6d4, #8b5cf6) border-box;
+}
+
+003. Animated gradient text
+------------------------------------------------------------------------
+Why it works: Clip a moving background to glyphs for colorful text that stays fully CSS-driven.
+
+CSS
+.gradient-text {
+  color: transparent;
+  background: linear-gradient(90deg, #06b6d4, #8b5cf6, #ec4899, #06b6d4);
+  background-size: 200% 100%;
+  background-clip: text;
+  animation: hue-slide 4s linear infinite;
+}
+@keyframes hue-slide { to { background-position: 200% 0; } }
+
+004. Gradient underline that follows the text
+------------------------------------------------------------------------
+Why it works: A no-repeat background can behave like an underline without adding markup or affecting line height.
+
+CSS
+.fancy-link {
+  text-decoration: none;
+  background: linear-gradient(90deg, #06b6d4, #8b5cf6)
+    0 100% / 100% 2px no-repeat;
+  padding-block-end: .15em;
+}
+
+005. Neon glow with layered text-shadow
+------------------------------------------------------------------------
+Why it works: Several increasingly soft shadows produce a convincing glow with no filter or extra element.
+
+CSS
+.neon {
+  color: #ecfeff;
+  text-shadow: 0 0 .2rem #22d3ee,
+    0 0 .6rem #22d3ee,
+    0 0 1.4rem #0891b2;
+}
+
+006. Natural elevation with layered box-shadow
+------------------------------------------------------------------------
+Why it works: Two low-opacity shadows usually look more realistic than one heavy shadow.
+
+CSS
+.elevated {
+  box-shadow: 0 1px 2px rgb(15 23 42 / .08),
+    0 12px 30px rgb(15 23 42 / .16);
+}
+
+007. Inner hairline without changing layout
+------------------------------------------------------------------------
+Why it works: An inset shadow creates a crisp inner rule while leaving the box model untouched.
+
+CSS
+.hairline {
+  box-shadow: inset 0 0 0 1px rgb(148 163 184 / .5);
+}
+
+008. Frosted glass panel
+------------------------------------------------------------------------
+Why it works: A translucent surface plus backdrop blur softens whatever is behind the element.
+
+CSS
+.glass {
+  background: rgb(15 23 42 / .58);
+  border: 1px solid rgb(255 255 255 / .18);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+009. Mouse-free spotlight background
+------------------------------------------------------------------------
+Why it works: Layer a radial gradient over a solid color to create a focused pool of light.
+
+CSS
+.spotlight {
+  background: radial-gradient(circle at 30% 20%,
+      rgb(34 211 238 / .28), transparent 32%),
+    #0f172a;
+}
+
+010. Checkerboard from one conic gradient
+------------------------------------------------------------------------
+Why it works: A tiled conic gradient can generate a crisp grid pattern without an image asset.
+
+CSS
+.checker {
+  background: conic-gradient(#e2e8f0 25%, #fff 0 50%,
+      #e2e8f0 0 75%, #fff 0) 0 0 / 24px 24px;
+}
+
+
+SECTION 02 - LAYOUT & ALIGNMENT
+========================================================================
+Use Grid and Flexbox for resilient alignment instead of positional nudges and magic numbers.
+
+011. Perfect centering with Grid
+------------------------------------------------------------------------
+Why it works: place-items centers a child on both axes in a single declaration.
+
+CSS
+.center-grid {
+  display: grid;
+  place-items: center;
+  min-block-size: 100dvh;
+}
+
+012. Centered cluster with Flexbox
+------------------------------------------------------------------------
+Why it works: Flexbox is ideal when several inline items need shared alignment and spacing.
+
+CSS
+.cluster {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: .75rem;
+}
+
+013. Auto-fit responsive card grid
+------------------------------------------------------------------------
+Why it works: auto-fit and minmax create as many columns as fit without breakpoint-specific column counts.
+
+CSS
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit,
+    minmax(min(16rem, 100%), 1fr));
+  gap: 1rem;
+}
+
+014. Push one flex item to the far edge
+------------------------------------------------------------------------
+Why it works: An auto logical margin consumes free space, so no spacer element is needed.
+
+CSS
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+.toolbar .account { margin-inline-start: auto; }
+
+015. Holy Grail page with named Grid areas
+------------------------------------------------------------------------
+Why it works: Named areas make the classic header-sidebar-content-footer layout readable and easy to rearrange.
+
+CSS
+.page {
+  display: grid;
+  grid-template: "head head" auto
+                 "side main" 1fr
+                 "foot foot" auto / 16rem 1fr;
+  min-block-size: 100dvh;
+}
+.header { grid-area: head; }
+.sidebar { grid-area: side; }
+.main { grid-area: main; }
+.footer { grid-area: foot; }
+
+016. Sticky footer without fixed positioning
+------------------------------------------------------------------------
+Why it works: A 1fr middle track expands on short pages and naturally pushes the footer to the viewport bottom.
+
+CSS
+body {
+  min-block-size: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+017. Equal-height cards in each Grid row
+------------------------------------------------------------------------
+Why it works: A shared 1fr implicit row size keeps sibling cards aligned without hard-coded heights.
+
+CSS
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
+  gap: 1rem;
+}
+
+018. Align nested card parts with subgrid
+------------------------------------------------------------------------
+Why it works: Subgrid lets internal rows participate in the parent track system so titles, bodies, and actions line up.
+
+CSS
+.catalog { display: grid; grid-template-columns: repeat(3, 1fr); }
+.card {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+}
+
+019. Full-bleed sections inside readable content
+------------------------------------------------------------------------
+Why it works: A three-column page grid gives normal content a measure while selected children span edge to edge.
+
+CSS
+.page {
+  display: grid;
+  grid-template-columns: minmax(1rem, 1fr) minmax(0, 70ch)
+    minmax(1rem, 1fr);
+}
+.page > * { grid-column: 2; }
+.page > .full-bleed { grid-column: 1 / -1; }
+
+020. Stop flex and Grid children from overflowing
+------------------------------------------------------------------------
+Why it works: min-inline-size: 0 allows a flexible child to shrink below its min-content width.
+
+CSS
+.flex-child,
+.grid-child {
+  min-inline-size: 0;
+}
+
+
+SECTION 03 - RESPONSIVE & INTRINSIC SIZING
+========================================================================
+Let content and available space drive sizing, then add breakpoints only when the design actually needs them.
+
+021. Fluid type with clamp()
+------------------------------------------------------------------------
+Why it works: clamp combines a minimum, fluid preferred size, and maximum in one expression.
+
+CSS
+h1 {
+  font-size: clamp(2rem, 1rem + 4vw, 5rem);
+  line-height: 1.05;
+}
+
+022. Fluid spacing with clamp()
+------------------------------------------------------------------------
+Why it works: The same technique scales padding smoothly while keeping comfortable lower and upper bounds.
+
+CSS
+.section {
+  padding-block: clamp(2rem, 1rem + 6vw, 7rem);
+  padding-inline: clamp(1rem, 4vw, 4rem);
+}
+
+023. Component breakpoints with container queries
+------------------------------------------------------------------------
+Why it works: A component can respond to the width of its container instead of the entire viewport.
+
+CSS
+.card-list { container-type: inline-size; }
+@container (width >= 42rem) {
+  .card { grid-template-columns: 12rem 1fr; }
+}
+
+024. Reserve media shape with aspect-ratio
+------------------------------------------------------------------------
+Why it works: aspect-ratio establishes geometry before media loads and avoids height hacks.
+
+CSS
+.video-frame {
+  inline-size: 100%;
+  aspect-ratio: 16 / 9;
+}
+
+025. Mobile-safe viewport height with dvh
+------------------------------------------------------------------------
+Why it works: Dynamic viewport units follow browser chrome changes; a vh fallback keeps older engines usable.
+
+CSS
+.hero {
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+}
+
+026. Content-sized boxes with fit-content
+------------------------------------------------------------------------
+Why it works: fit-content hugs the content while still allowing a max size to protect narrow screens.
+
+CSS
+.tag {
+  inline-size: fit-content;
+  max-inline-size: 100%;
+}
+
+027. Intrinsic label plus flexible content column
+------------------------------------------------------------------------
+Why it works: max-content keeps labels intact while minmax(0, 1fr) lets the main track absorb the rest.
+
+CSS
+.field-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: .75rem;
+}
+
+028. Direction-safe spacing with logical properties
+------------------------------------------------------------------------
+Why it works: Logical properties adapt to writing mode and text direction without left/right overrides.
+
+CSS
+.callout {
+  margin-inline: auto;
+  padding-inline: 1.25rem;
+  border-inline-start: .25rem solid #06b6d4;
+}
+
+029. Readable media-query range syntax
+------------------------------------------------------------------------
+Why it works: Range comparisons express bounded breakpoints more directly than paired min/max conditions.
+
+CSS
+@media (30rem <= width < 60rem) {
+  .layout { grid-template-columns: 1fr 1fr; }
+}
+
+030. Only hover when the device can hover
+------------------------------------------------------------------------
+Why it works: Capability queries prevent hover-only affordances from being applied to coarse touch input.
+
+CSS
+@media (hover: hover) and (pointer: fine) {
+  .card:hover { transform: translateY(-2px); }
+}
+
+
+SECTION 04 - TYPOGRAPHY & TEXT
+========================================================================
+Improve readability, wrapping, rhythm, and numeric alignment with modern text controls.
+
+031. Clamp text to a fixed number of lines
+------------------------------------------------------------------------
+Why it works: The widely used WebKit line-clamp pattern truncates multi-line summaries while preserving layout height.
+
+CSS
+.summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+032. Single-line ellipsis that actually works
+------------------------------------------------------------------------
+Why it works: All three properties are needed for a reliable single-line overflow ellipsis.
+
+CSS
+.truncate {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+033. Balanced heading line breaks
+------------------------------------------------------------------------
+Why it works: text-wrap: balance evens out short multi-line headings without manual break tags.
+
+CSS
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
+034. Prettier paragraph wrapping
+------------------------------------------------------------------------
+Why it works: text-wrap: pretty asks the browser to favor more polished line endings in body copy.
+
+CSS
+.prose p {
+  text-wrap: pretty;
+}
+
+035. Keep prose at a readable measure
+------------------------------------------------------------------------
+Why it works: Character units make line length track the typography rather than an arbitrary pixel width.
+
+CSS
+.prose {
+  max-inline-size: 65ch;
+  margin-inline: auto;
+}
+
+036. Control underline thickness and offset
+------------------------------------------------------------------------
+Why it works: Native underlines can be styled cleanly while continuing to follow wrapped text.
+
+CSS
+a {
+  text-decoration-thickness: .08em;
+  text-underline-offset: .18em;
+  text-decoration-skip-ink: auto;
+}
+
+037. Tabular numbers for aligned metrics
+------------------------------------------------------------------------
+Why it works: Tabular numeral glyphs give each digit equal width so changing values do not visually jump.
+
+CSS
+.metric,
+.timer {
+  font-variant-numeric: tabular-nums;
+}
+
+038. Address a variable font axis
+------------------------------------------------------------------------
+Why it works: font-variation-settings can select a precise value on an available variable-font axis.
+
+CSS
+.display-type {
+  font-variation-settings: "wght" 675;
+}
+
+039. Hyphenate long prose gracefully
+------------------------------------------------------------------------
+Why it works: Automatic hyphenation can reduce ragged edges and overflow when the document language is declared correctly.
+
+CSS
+.prose {
+  hyphens: auto;
+  overflow-wrap: break-word;
+}
+
+040. Drop cap with ::first-letter
+------------------------------------------------------------------------
+Why it works: The first-letter pseudo-element creates an editorial opening without extra markup.
+
+CSS
+.article > p:first-of-type::first-letter {
+  float: inline-start;
+  font-size: 4rem;
+  line-height: .8;
+  margin-inline-end: .12em;
+}
+
+
+SECTION 05 - SELECTORS & STATE
+========================================================================
+Express relationships and UI state in selectors so fewer helper classes and JavaScript hooks are necessary.
+
+041. Style a parent with :has()
+------------------------------------------------------------------------
+Why it works: :has lets a container react to descendants or siblings that match a condition.
+
+CSS
+.todo:has(> input:checked) {
+  opacity: .6;
+  text-decoration: line-through;
+}
+
+042. Group selector alternatives with :is()
+------------------------------------------------------------------------
+Why it works: :is keeps repeated selector prefixes short and readable.
+
+CSS
+.article :is(h2, h3, h4) {
+  scroll-margin-block-start: 6rem;
+}
+
+043. Create zero-specificity defaults with :where()
+------------------------------------------------------------------------
+Why it works: :where always contributes zero specificity, making library defaults easy for consumers to override.
+
+CSS
+:where(.prose) :where(h2, h3, p, ul) {
+  margin-block: 0 1rem;
+}
+
+044. Exclude states with :not()
+------------------------------------------------------------------------
+Why it works: :not applies a rule broadly while carving out explicit exceptions.
+
+CSS
+.button:not(:disabled):not([aria-busy="true"]) {
+  cursor: pointer;
+}
+
+045. Count only matching siblings in :nth-child()
+------------------------------------------------------------------------
+Why it works: The of selector clause makes alternating patterns ignore hidden or unrelated siblings.
+
+CSS
+.row:nth-child(2n of :not([hidden])) {
+  background: #f8fafc;
+}
+
+046. Keyboard-focused rings with :focus-visible
+------------------------------------------------------------------------
+Why it works: :focus-visible shows an obvious focus cue without forcing the same ring on ordinary pointer clicks.
+
+CSS
+:focus-visible {
+  outline: 3px solid #06b6d4;
+  outline-offset: 3px;
+}
+
+047. Highlight a group with :focus-within
+------------------------------------------------------------------------
+Why it works: A wrapper can signal that any nested control currently owns focus.
+
+CSS
+.field:focus-within {
+  border-color: #06b6d4;
+  box-shadow: 0 0 0 3px rgb(6 182 212 / .18);
+}
+
+048. Style the URL fragment target
+------------------------------------------------------------------------
+Why it works: :target makes in-page navigation visible using only the fragment identifier.
+
+CSS
+section:target {
+  outline: 3px solid #f59e0b;
+  outline-offset: .5rem;
+}
+
+049. Animate native details when it is open
+------------------------------------------------------------------------
+Why it works: The open attribute exposes disclosure state without inventing a JavaScript state class.
+
+CSS
+details[open] > summary {
+  color: #7c3aed;
+}
+details[open] .answer { animation: reveal .2s ease-out; }
+@keyframes reveal { from { opacity: 0; translate: 0 -.25rem; } }
+
+050. Drive components with data-state attributes
+------------------------------------------------------------------------
+Why it works: A semantic state attribute creates a stable styling contract for JavaScript-powered components.
+
+CSS
+.tabs [data-state="active"] {
+  color: #0f172a;
+  border-block-end: 2px solid #7c3aed;
+}
+
+
+SECTION 06 - FORMS & INTERACTION
+========================================================================
+Polish native controls while preserving their semantics, focus behavior, and platform strengths.
+
+051. Theme native controls with accent-color
+------------------------------------------------------------------------
+Why it works: accent-color recolors supported native checkboxes, radios, ranges, and progress controls with almost no CSS.
+
+CSS
+:root {
+  accent-color: #7c3aed;
+}
+
+052. CSS switch driven by a real checkbox
+------------------------------------------------------------------------
+Why it works: Keep the checkbox as the state source and style the adjacent track instead of replacing semantics with a div.
+
+CSS
+.switch input { position: absolute; opacity: 0; }
+.track {
+  inline-size: 2.75rem; padding: .2rem;
+  background: #cbd5e1; border-radius: 2rem;
+}
+.track::after {
+  content: ""; display: block; inline-size: 1rem; aspect-ratio: 1;
+  background: white; border-radius: 50%; transition: .2s;
+}
+.switch input:focus-visible + .track { outline: 3px solid #06b6d4; }
+.switch input:checked + .track { background: #7c3aed; }
+.switch input:checked + .track::after { translate: 1.35rem 0; }
+
+053. Floating label with :placeholder-shown
+------------------------------------------------------------------------
+Why it works: The placeholder state distinguishes an empty field from a populated one without JavaScript.
+
+CSS
+.field { position: relative; }
+.field input { padding: 1.25rem .75rem .5rem; }
+.field label {
+  position: absolute; inset: .9rem auto auto .75rem; transition: .2s;
+}
+.field input:focus + label,
+.field input:not(:placeholder-shown) + label {
+  translate: 0 -.65rem; font-size: .75rem;
+}
+
+054. Validate after user interaction with :user-invalid
+------------------------------------------------------------------------
+Why it works: :user-invalid avoids showing an error state before the user has had a chance to interact with a field.
+
+CSS
+input:user-invalid,
+textarea:user-invalid {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgb(220 38 38 / .12);
+}
+
+055. Style the native file button
+------------------------------------------------------------------------
+Why it works: ::file-selector-button reaches the button inside a file input without rebuilding the control.
+
+CSS
+input[type="file"]::file-selector-button {
+  border: 0;
+  border-radius: .5rem;
+  padding: .6rem .9rem;
+  background: #0f172a;
+  color: white;
+}
+
+056. Custom select arrow without an image
+------------------------------------------------------------------------
+Why it works: A wrapper pseudo-element can draw an arrow while pointer-events keeps the select fully clickable.
+
+CSS
+.select-wrap { position: relative; }
+.select-wrap::after {
+  content: ""; position: absolute; inset: 45% .8rem auto auto;
+  border: .35rem solid transparent; border-top-color: currentColor;
+  pointer-events: none;
+}
+select { appearance: none; padding-inline-end: 2.5rem; }
+
+057. Custom range thumb
+------------------------------------------------------------------------
+Why it works: Range pseudo-elements let the thumb carry your visual language while the input keeps its native value semantics.
+
+CSS
+input[type="range"] {
+  appearance: none; block-size: .4rem;
+  background: #cbd5e1; border-radius: 1rem;
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none; inline-size: 1.1rem; block-size: 1.1rem;
+  border-radius: 50%; background: #7c3aed;
+}
+input[type="range"]::-moz-range-thumb {
+  inline-size: 1.1rem; block-size: 1.1rem; border: 0;
+  border-radius: 50%; background: #7c3aed;
+}
+
+058. Style an open Popover API element
+------------------------------------------------------------------------
+Why it works: :popover-open targets a native popover only while it is displayed.
+
+CSS
+[popover]:popover-open {
+  border: 0;
+  border-radius: 1rem;
+  box-shadow: 0 20px 60px rgb(15 23 42 / .28);
+}
+
+059. Brand the text caret
+------------------------------------------------------------------------
+Why it works: caret-color changes the insertion cursor without affecting the text color.
+
+CSS
+input,
+textarea,
+[contenteditable] {
+  caret-color: #7c3aed;
+}
+
+060. Auto-grow controls with field-sizing
+------------------------------------------------------------------------
+Why it works: field-sizing: content lets supported text controls size themselves from their content instead of script-measured heights.
+
+CSS
+textarea,
+input {
+  field-sizing: content;
+}
+textarea { min-block-size: 4lh; max-block-size: 12lh; }
+
+
+SECTION 07 - PSEUDO-ELEMENTS, LISTS & COUNTERS
+========================================================================
+Use generated content for decoration and numbering, while keeping essential information in the document itself.
+
+061. Decorative icon with ::before
+------------------------------------------------------------------------
+Why it works: A pseudo-element is ideal for non-essential decoration that should not require another DOM node.
+
+CSS
+.external-link::before {
+  content: ">";
+  margin-inline-end: .35em;
+  color: #7c3aed;
+}
+
+062. Lightweight tooltip from a data attribute
+------------------------------------------------------------------------
+Why it works: attr can mirror short, non-essential helper text into generated content; essential help should remain in accessible markup.
+
+CSS
+[data-tip] { position: relative; }
+[data-tip]:is(:hover, :focus-visible)::after {
+  content: attr(data-tip);
+  position: absolute; inset: auto auto calc(100% + .5rem) 0;
+  padding: .4rem .6rem; white-space: nowrap;
+  background: #0f172a; color: white; pointer-events: none;
+}
+
+063. Style list bullets with ::marker
+------------------------------------------------------------------------
+Why it works: ::marker changes marker appearance directly, avoiding pseudo-element list hacks.
+
+CSS
+li::marker {
+  color: #7c3aed;
+  font-weight: 700;
+}
+
+064. Number steps with CSS counters
+------------------------------------------------------------------------
+Why it works: Counters generate consistent step numbers even when items are inserted or reordered.
+
+CSS
+.steps { list-style: none; counter-reset: step; }
+.steps > li { counter-increment: step; }
+.steps > li::before {
+  content: counter(step) ". ";
+  font-weight: 700;
+}
+
+065. Hierarchical numbering with counters()
+------------------------------------------------------------------------
+Why it works: counters joins nested counter levels into outline-style numbers such as 2.3.1.
+
+CSS
+.outline ol { counter-reset: item; }
+.outline li { display: block; }
+.outline li::before {
+  counter-increment: item;
+  content: counters(item, ".") " ";
+}
+
+066. Empty-state message with :empty
+------------------------------------------------------------------------
+Why it works: A truly empty container can display a decorative placeholder without conditional rendering.
+
+CSS
+.results:empty::before {
+  content: "No results yet";
+  color: #64748b;
+  font-style: italic;
+}
+
+067. Editorial quote mark without extra markup
+------------------------------------------------------------------------
+Why it works: Generated quotation decoration keeps the source blockquote focused on its actual content.
+
+CSS
+blockquote::before {
+  content: open-quote;
+  color: #c4b5fd;
+  font-size: 4rem;
+  line-height: 0;
+}
+
+068. Lead-in styling with ::first-line
+------------------------------------------------------------------------
+Why it works: The first rendered line can receive typographic emphasis without knowing where it will wrap.
+
+CSS
+.intro::first-line {
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+
+069. Custom text-selection colors
+------------------------------------------------------------------------
+Why it works: ::selection can align highlight colors with the theme while maintaining readable contrast.
+
+CSS
+::selection {
+  background: #fde68a;
+  color: #422006;
+}
+
+070. Style the backdrop behind a modal dialog
+------------------------------------------------------------------------
+Why it works: ::backdrop targets the browser-created layer behind top-layer dialogs.
+
+CSS
+dialog::backdrop {
+  background: rgb(15 23 42 / .65);
+  backdrop-filter: blur(4px);
+}
+
+
+SECTION 08 - IMAGES, MASKS & BLENDING
+========================================================================
+Crop, fade, recolor, and composite media directly in CSS while preserving flexible layout behavior.
+
+071. Crop media cleanly with object-fit
+------------------------------------------------------------------------
+Why it works: object-fit: cover fills a known frame while preserving the source aspect ratio.
+
+CSS
+.thumb {
+  inline-size: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+072. Move the crop focal point with object-position
+------------------------------------------------------------------------
+Why it works: object-position keeps an important face or subject visible when cover cropping trims the edges.
+
+CSS
+.portrait {
+  object-fit: cover;
+  object-position: 50% 20%;
+}
+
+073. Circular crop with clip-path
+------------------------------------------------------------------------
+Why it works: clip-path can crop any element to a circle without overflow wrappers.
+
+CSS
+.avatar {
+  clip-path: circle(50% at 50% 50%);
+}
+
+074. Angled hero crop with polygon()
+------------------------------------------------------------------------
+Why it works: A polygon clip creates art-directed geometric edges without an SVG mask.
+
+CSS
+.hero-art {
+  clip-path: polygon(0 0, 100% 0, 88% 100%, 0 100%);
+}
+
+075. Fade an image edge with a mask
+------------------------------------------------------------------------
+Why it works: A luminance/alpha mask makes the media fade into the surrounding surface without editing the source image.
+
+CSS
+.fade-bottom {
+  mask-image: linear-gradient(to bottom, #000 65%, transparent 100%);
+}
+
+076. Soft vignette with a radial mask
+------------------------------------------------------------------------
+Why it works: A radial mask keeps the center opaque while feathering all outer edges.
+
+CSS
+.vignette {
+  mask-image: radial-gradient(ellipse at center,
+    #000 55%, transparent 85%);
+}
+
+077. Blend an element with its backdrop
+------------------------------------------------------------------------
+Why it works: mix-blend-mode combines the rendered element with pixels behind it for poster-like compositing.
+
+CSS
+.light-leak {
+  mix-blend-mode: screen;
+  opacity: .8;
+}
+
+078. Blend multiple background layers
+------------------------------------------------------------------------
+Why it works: background-blend-mode composites an element's own background images and colors together.
+
+CSS
+.duotone {
+  background: url("portrait.jpg") center / cover, #7c3aed;
+  background-blend-mode: multiply;
+}
+
+079. Shadow transparent PNG/SVG content
+------------------------------------------------------------------------
+Why it works: filter: drop-shadow follows the visible alpha shape instead of the rectangular image box.
+
+CSS
+.logo {
+  filter: drop-shadow(0 .5rem 1rem rgb(15 23 42 / .3));
+}
+
+080. Resolution-aware CSS images with image-set()
+------------------------------------------------------------------------
+Why it works: image-set offers density alternatives so the browser can choose an appropriate background resource.
+
+CSS
+.hero {
+  background-image: url("hero.webp");
+  background-image: image-set(
+    url("hero.webp") 1x,
+    url("hero@2x.webp") 2x);
+}
+
+
+SECTION 09 - ANIMATION & MOTION
+========================================================================
+Create expressive motion with transform-friendly properties, then provide a reduced-motion path by default.
+
+081. Global reduced-motion safety net
+------------------------------------------------------------------------
+Why it works: Respect the user's motion preference by minimizing non-essential animation and smooth scrolling.
+
+CSS
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+082. Stagger children with a custom property
+------------------------------------------------------------------------
+Why it works: Give each child an index and calculate its delay instead of writing a separate nth-child rule for every item.
+
+CSS
+.item {
+  animation: enter .4s ease-out both;
+  animation-delay: calc(var(--i) * 80ms);
+}
+@keyframes enter { from { opacity: 0; translate: 0 .75rem; } }
+
+083. Typing reveal with steps()
+------------------------------------------------------------------------
+Why it works: A stepped timing function reveals one character-width increment at a time for a terminal-style effect.
+
+CSS
+.typing {
+  inline-size: 24ch;
+  white-space: nowrap;
+  overflow: hidden;
+  border-inline-end: 1px solid;
+  animation: typing 2s steps(24) both;
+}
+@keyframes typing { from { inline-size: 0; } }
+
+084. 3D flip card
+------------------------------------------------------------------------
+Why it works: Perspective on the scene plus preserve-3d and backface visibility creates a true two-sided flip.
+
+CSS
+.scene { perspective: 60rem; }
+.card {
+  position: relative; transform-style: preserve-3d;
+  transition: transform .6s;
+}
+.scene:hover .card { transform: rotateY(180deg); }
+.front, .back {
+  position: absolute; inset: 0;
+  backface-visibility: hidden;
+}
+.back { transform: rotateY(180deg); }
+
+085. Animate individual transform properties
+------------------------------------------------------------------------
+Why it works: translate, rotate, and scale can transition independently instead of competing inside one transform string.
+
+CSS
+.chip {
+  translate: 0 0;
+  scale: 1;
+  transition: translate .2s, scale .2s;
+}
+.chip:hover { translate: 0 -.2rem; scale: 1.03; }
+
+086. Move an element along a path
+------------------------------------------------------------------------
+Why it works: Motion-path properties animate a box along a curve without manually calculating x/y keyframes.
+
+CSS
+.orb {
+  offset-path: path("M0,80 C80,0 160,160 240,80");
+  animation: travel 2s ease-in-out infinite alternate;
+}
+@keyframes travel { to { offset-distance: 100%; } }
+
+087. Allow discrete display transitions
+------------------------------------------------------------------------
+Why it works: allow-discrete lets discrete properties participate in transitions; pair it with a starting style for smooth entry.
+
+CSS
+.panel {
+  display: none;
+  opacity: 0;
+  transition: opacity .2s, display .2s allow-discrete;
+}
+.panel.open { display: block; opacity: 1; }
+
+088. Define an entry state with @starting-style
+------------------------------------------------------------------------
+Why it works: @starting-style provides a before state for elements that begin rendering, such as a newly shown popover or dialog.
+
+CSS
+.toast {
+  opacity: 1;
+  translate: 0 0;
+  transition: opacity .25s, translate .25s;
+}
+@starting-style {
+  .toast { opacity: 0; translate: 0 .75rem; }
+}
+
+089. Customize a named View Transition
+------------------------------------------------------------------------
+Why it works: A stable view-transition-name lets CSS style the old/new snapshots created by the View Transition API.
+
+CSS
+.product-hero { view-transition-name: product; }
+::view-transition-old(product),
+::view-transition-new(product) {
+  animation-duration: .35s;
+}
+
+090. Scroll-driven page progress bar
+------------------------------------------------------------------------
+Why it works: A scroll timeline can drive animation progress directly from document scroll position.
+
+CSS
+.progress {
+  transform-origin: left;
+  scale: 0 1;
+  animation: fill linear;
+  animation-timeline: scroll(root block);
+}
+@keyframes fill { to { scale: 1 1; } }
+
+
+SECTION 10 - SCROLLING & VIEWPORT BEHAVIOR
+========================================================================
+Make long pages feel intentional with snapping, sticky positioning, safe offsets, and scroll-boundary control.
+
+091. Horizontal scroll snapping
+------------------------------------------------------------------------
+Why it works: Scroll snapping gives touch and trackpad carousels stable resting positions without scripting the scroll.
+
+CSS
+.rail {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+}
+.rail > * { flex: 0 0 80%; scroll-snap-align: start; }
+
+092. Smooth anchors with a reduced-motion fallback
+------------------------------------------------------------------------
+Why it works: Enable smooth in-page scrolling only for users who have not requested reduced motion.
+
+CSS
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+093. Sticky header without JavaScript
+------------------------------------------------------------------------
+Why it works: position: sticky keeps an element in normal flow until it reaches its specified inset.
+
+CSS
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+094. Offset anchor targets below a sticky header
+------------------------------------------------------------------------
+Why it works: scroll-margin moves the snapped target position without padding every section.
+
+CSS
+[id] {
+  scroll-margin-block-start: 6rem;
+}
+
+095. Stop scroll chaining in nested panels
+------------------------------------------------------------------------
+Why it works: overscroll-behavior contains the scroll gesture instead of passing it to the page at a boundary.
+
+CSS
+.modal-body {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+096. Reserve scrollbar space to prevent layout shift
+------------------------------------------------------------------------
+Why it works: scrollbar-gutter keeps a stable gutter so content does not jump when overflow appears.
+
+CSS
+html {
+  scrollbar-gutter: stable;
+}
+
+097. Theme scrollbars with standard properties
+------------------------------------------------------------------------
+Why it works: scrollbar-color and scrollbar-width provide a concise standards-based scrollbar treatment.
+
+CSS
+.scroller {
+  scrollbar-width: thin;
+  scrollbar-color: #64748b #e2e8f0;
+}
+
+098. Respect device safe areas
+------------------------------------------------------------------------
+Why it works: env safe-area insets keep fixed UI clear of notches and rounded screen edges.
+
+CSS
+.bottom-bar {
+  padding-block-end: max(1rem, env(safe-area-inset-bottom));
+  padding-inline: max(1rem, env(safe-area-inset-left))
+    max(1rem, env(safe-area-inset-right));
+}
+
+099. Clip overflow without creating a scroll container
+------------------------------------------------------------------------
+Why it works: overflow: clip hides overflow while avoiding the scrolling behavior introduced by overflow: hidden.
+
+CSS
+.art-frame {
+  overflow: clip;
+  border-radius: 1rem;
+}
+
+100. Opt a region out of scroll anchoring
+------------------------------------------------------------------------
+Why it works: overflow-anchor: none prevents a frequently changing region from becoming the browser's scroll anchor.
+
+CSS
+.live-feed {
+  overflow-anchor: none;
+}
+
+
+SECTION 11 - COLOR, THEMING & CASCADE
+========================================================================
+Centralize design tokens and control the cascade explicitly so themes stay predictable as a stylesheet grows.
+
+101. Theme tokens with CSS custom properties
+------------------------------------------------------------------------
+Why it works: Semantic variables create one contract for components and make theme overrides cheap.
+
+CSS
+:root { --surface: #fff; --text: #0f172a; --brand: #7c3aed; }
+[data-theme="dark"] {
+  --surface: #0f172a;
+  --text: #f8fafc;
+}
+.card { background: var(--surface); color: var(--text); }
+
+102. Automatic dark theme from system preference
+------------------------------------------------------------------------
+Why it works: prefers-color-scheme can swap theme tokens when the user has selected a dark system appearance.
+
+CSS
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #0f172a;
+    --text: #f8fafc;
+  }
+}
+
+103. Tell native UI which color schemes you support
+------------------------------------------------------------------------
+Why it works: color-scheme lets built-in controls, scrollbars, and form surfaces choose appropriate light/dark rendering.
+
+CSS
+:root {
+  color-scheme: light dark;
+}
+
+104. Choose theme colors with light-dark()
+------------------------------------------------------------------------
+Why it works: light-dark selects a color from the active color scheme without duplicating a media query.
+
+CSS
+:root {
+  color-scheme: light dark;
+  --surface: light-dark(#ffffff, #0f172a);
+  --text: light-dark(#0f172a, #f8fafc);
+}
+
+105. Generate tints with color-mix()
+------------------------------------------------------------------------
+Why it works: color-mix derives related colors from a token instead of hard-coding a second palette value.
+
+CSS
+.button:hover {
+  background: color-mix(in oklab, var(--brand) 82%, white);
+}
+
+106. Adjust a color with relative color syntax
+------------------------------------------------------------------------
+Why it works: Relative colors reuse the original channels and modify only the channel that needs to change.
+
+CSS
+.button {
+  --brand: hsl(262 83% 58%);
+  background: var(--brand);
+}
+.button:hover { background: hsl(from var(--brand) h s calc(l - 8)); }
+
+107. Make icons inherit text color with currentColor
+------------------------------------------------------------------------
+Why it works: currentColor lets borders, fills, and decorative surfaces follow the computed color automatically.
+
+CSS
+.icon-button {
+  color: #7c3aed;
+  border: 1px solid currentColor;
+}
+.icon-button svg { fill: currentColor; }
+
+108. Control precedence with cascade layers
+------------------------------------------------------------------------
+Why it works: @layer makes origin order explicit so low-level resets cannot accidentally overpower component rules.
+
+CSS
+@layer reset, base, components;
+@layer reset { * { box-sizing: border-box; } }
+@layer components {
+  .button { background: #7c3aed; color: white; }
+}
+
+109. Limit selector reach with @scope
+------------------------------------------------------------------------
+Why it works: A scope root and optional lower boundary keep local styles from leaking into nested widgets.
+
+CSS
+@scope (.article) to (.widget) {
+  a {
+    color: #7c3aed;
+    text-underline-offset: .2em;
+  }
+}
+
+110. Native CSS nesting
+------------------------------------------------------------------------
+Why it works: Nesting keeps a component's related states and child selectors close to the base rule.
+
+CSS
+.card {
+  color: #0f172a;
+  & > h2 { margin-block-start: 0; }
+  &:hover { box-shadow: 0 8px 24px rgb(15 23 42 / .12); }
+}
+
+
+SECTION 12 - ACCESSIBILITY, PERFORMANCE & PRINT
+========================================================================
+Finish with patterns that protect keyboard access, user preferences, rendering cost, and non-screen output.
+
+111. Visually hide text but keep it accessible
+------------------------------------------------------------------------
+Why it works: The classic screen-reader-only pattern removes text from visual layout without using display: none.
+
+CSS
+.sr-only {
+  position: absolute;
+  inline-size: 1px; block-size: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+
+112. Reveal a skip link only on focus
+------------------------------------------------------------------------
+Why it works: A keyboard user can jump past repeated navigation while the link stays unobtrusive for pointer users.
+
+CSS
+.skip-link {
+  position: fixed; inset: .5rem auto auto .5rem;
+  translate: 0 -200%;
+  z-index: 999;
+}
+.skip-link:focus { translate: 0 0; }
+
+113. Keep controls visible in forced-colors mode
+------------------------------------------------------------------------
+Why it works: An explicit system-color border can preserve control boundaries when authored colors are replaced.
+
+CSS
+@media (forced-colors: active) {
+  .button {
+    border: 1px solid ButtonText;
+  }
+}
+
+114. Strengthen UI for higher contrast preference
+------------------------------------------------------------------------
+Why it works: prefers-contrast can simplify effects and make structural boundaries more obvious.
+
+CSS
+@media (prefers-contrast: more) {
+  .card {
+    border: 2px solid currentColor;
+    box-shadow: none;
+  }
+}
+
+115. Increase target size for coarse pointers
+------------------------------------------------------------------------
+Why it works: Pointer capability queries can give touch users larger targets without inflating desktop layouts.
+
+CSS
+@media (pointer: coarse) {
+  button, .button {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+}
+
+116. Skip rendering far-off content
+------------------------------------------------------------------------
+Why it works: content-visibility: auto lets the browser defer off-screen rendering; an intrinsic size stabilizes layout estimates.
+
+CSS
+.article-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+
+117. Contain an independent widget
+------------------------------------------------------------------------
+Why it works: Containment limits how much an isolated component's layout and painting can affect the rest of the page.
+
+CSS
+.standalone-widget {
+  contain: layout paint;
+}
+
+118. Create a predictable stacking context
+------------------------------------------------------------------------
+Why it works: isolation: isolate creates a new stacking context without inventing a z-index value.
+
+CSS
+.component {
+  isolation: isolate;
+}
+
+119. Print-friendly cleanup and page breaks
+------------------------------------------------------------------------
+Why it works: A print media block can remove navigation, expose link destinations, and keep cards together on paper.
+
+CSS
+@media print {
+  nav, .no-print { display: none !important; }
+  a[href]::after { content: " (" attr(href) ")"; }
+  .card { break-inside: avoid; }
+}
+
+120. Progressively enhance with @supports
+------------------------------------------------------------------------
+Why it works: Feature queries isolate an enhancement so the baseline remains usable when a property is unavailable.
+
+CSS
+.gallery { display: flex; flex-wrap: wrap; }
+@supports (display: grid) {
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  }
+}
+
+========================================================================
+END OF COMPENDIUM
+120 patterns | 12 sections
