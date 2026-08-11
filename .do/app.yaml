@@ -24,7 +24,7 @@ services:
         scope: RUN_TIME
         type: GENERAL
       - key: APP_VERSION
-        value: 2.0.0
+        value: 2.8.12
         scope: RUN_TIME
         type: GENERAL
       - key: ENVIRONMENT
@@ -52,5 +52,6 @@ services:
         scope: RUN_TIME
         type: GENERAL
 # Configure AION_API_KEYS, AION_ADMIN_KEYS, CORS_ORIGINS, provider keys,
-# BRAVE_API_KEY, and GitHub App credentials as encrypted runtime variables
-# in the DigitalOcean control panel. They are deliberately absent here.
+# BRAVE_API_KEY, GDY_API_KEY, and GitHub App credentials as encrypted
+# runtime variables in the DigitalOcean control panel. They are
+# deliberately absent here.
