@@ -294,13 +294,26 @@ async def gdy_search(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any
 import json as _json
 from pathlib import Path as _Path
 
-# Find the repo root by walking up from this file until we find the
-# data/ directory next to us. This avoids off-by-one path bugs.
+# Find the meta-catalog. Order:
+#   1. Walk up from this file until we find data/gdy_meta_catalog.json
+#      (covers local dev + git checkout).
+#   2. /app/data/gdy_meta_catalog.json — the DO image layout.
+#   3. $AION_DATA_DIR/gdy_meta_catalog.json — runtime override mount.
+#   4. CWD-relative data/gdy_meta_catalog.json — last resort.
 _META_CATALOG_PATH: _Path | None = None
 for _candidate in (_Path(__file__).resolve().parent, *_Path(__file__).resolve().parents):
     if (_candidate / "data" / "gdy_meta_catalog.json").is_file():
         _META_CATALOG_PATH = _candidate / "data" / "gdy_meta_catalog.json"
         break
+if _META_CATALOG_PATH is None:
+    for _env_path in ("/app/data/gdy_meta_catalog.json",):
+        if _Path(_env_path).is_file():
+            _META_CATALOG_PATH = _Path(_env_path)
+            break
+if _META_CATALOG_PATH is None:
+    _aion_data = _Path(__import__("os").environ.get("AION_DATA_DIR", ""))
+    if _aion_data and (_aion_data / "gdy_meta_catalog.json").is_file():
+        _META_CATALOG_PATH = _aion_data / "gdy_meta_catalog.json"
 if _META_CATALOG_PATH is None:
     # Fallback: assume CWD-relative
     _META_CATALOG_PATH = _Path("data/gdy_meta_catalog.json").resolve()
