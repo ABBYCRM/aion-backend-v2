@@ -14,6 +14,7 @@ data/
 !data/tasks/
 !data/extra_scenarios/
 !data/syntax/
+!data/gdy_meta_catalog.json
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

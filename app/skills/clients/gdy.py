@@ -319,10 +319,8 @@ if _META_CATALOG_PATH is None:
     _META_CATALOG_PATH = _Path("data/gdy_meta_catalog.json").resolve()
 
 # Debug log on import (visible in `doctl apps logs`).
-import logging as _logging
-_logging.getLogger(__name__).info(
-    "gdy.meta_catalog path=%s exists=%s", _META_CATALOG_PATH, _META_CATALOG_PATH.is_file()
-)
+# (intentionally no info-level log here — the path resolution log is
+# only useful during bring-up; production logs stay clean.)
 _META_CATALOG_CACHE: list[dict] | None = None
 
 
@@ -330,15 +328,11 @@ def _load_meta_catalog() -> list[dict]:
     global _META_CATALOG_CACHE
     if _META_CATALOG_CACHE is not None:
         return _META_CATALOG_CACHE
-    import sys as _sys
-    print(f"DEBUG gdy.meta_catalog: _META_CATALOG_PATH={_META_CATALOG_PATH!r} exists={bool(_META_CATALOG_PATH and _META_CATALOG_PATH.is_file())} cwd={_Path.cwd()!r}", flush=True)
     if not _META_CATALOG_PATH or not _META_CATALOG_PATH.is_file():
         return []
     try:
         _META_CATALOG_CACHE = _json.loads(_META_CATALOG_PATH.read_text())
-        print(f"DEBUG gdy.meta_catalog: loaded {len(_META_CATALOG_CACHE)} entries", flush=True)
-    except Exception as exc:
-        print(f"DEBUG gdy.meta_catalog: load failed: {exc!r}", flush=True)
+    except Exception:
         _META_CATALOG_CACHE = []
     return _META_CATALOG_CACHE
 
