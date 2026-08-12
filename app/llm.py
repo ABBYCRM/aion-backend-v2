@@ -59,6 +59,7 @@ def configured_providers() -> list[str]:
     if _vault_value("OPENAI_API_KEY"): providers.append("openai")
     if _vault_value("MOONSHOT_API_KEY") or _vault_value("KIMI_API_KEY"): providers.append("moonshot")
     if _vault_value("NVIDIA_API_KEY"): providers.append("nvidia")
+    if _vault_value("XAI_API_KEY"): providers.append("xai")
     if _vault_value("BITDEER_API_KEY"): providers.append("bitdeer")
     if _vault_value("OPENROUTER_API_KEY"): providers.append("openrouter")
     if _vault_value("ANTHROPIC_API_KEY"): providers.append("anthropic")
@@ -83,6 +84,9 @@ def _client_for(provider: str) -> Any:
     if provider == "nvidia":
         key = _pooled_key("nvidia", _vault_value("NVIDIA_API_KEY"))
         if key: return AsyncOpenAI(api_key=key, base_url=settings.nvidia_base_url, timeout=settings.request_timeout_seconds)
+    if provider == "xai":
+        key = _pooled_key("xai", _vault_value("XAI_API_KEY"))
+        if key: return AsyncOpenAI(api_key=key, base_url=settings.xai_base_url, timeout=settings.request_timeout_seconds)
     if provider == "bitdeer":
         key = _pooled_key("bitdeer", _vault_value("BITDEER_API_KEY"))
         if key: return AsyncOpenAI(api_key=key, base_url=settings.bitdeer_base_url, timeout=settings.request_timeout_seconds, default_headers={"User-Agent": f"AION/{settings.app_version}"})
@@ -149,6 +153,7 @@ def _default_provider(model: str) -> str:
         if _vault_value("HELICONE_API_KEY"): return "helicone"
         return "openai"
     if model.startswith(("nvidia/", "meta/", "mistralai/", "google/")) and _vault_value("NVIDIA_API_KEY"): return "nvidia"
+    if (model.startswith("xai/") or model.startswith("grok-")) and _vault_value("XAI_API_KEY"): return "xai"
     if model.startswith(("deepseek-", "deepseek/")) and _vault_value("BITDEER_API_KEY"): return "bitdeer"
     if model.startswith("@cf/") and _vault_value("CLOUDFLARE_API_TOKEN") and _vault_value("CLOUDFLARE_BASE_URL"): return "cloudflare"
     if model.startswith("claude-") and _vault_value("ANTHROPIC_API_KEY"): return "anthropic"

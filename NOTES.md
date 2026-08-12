@@ -1,5 +1,44 @@
 # Notes
 
+## 2026-08-12 (later) — memory, streaming, model upgrade (Claude)
+
+Operator report: "it can't even remember the last thing I asked" + "I need a
+stronger model than chat gpt mini" + wants nvidia/xai as alternatives.
+
+- **Stronger default model.** `openai_chat_model`/`primary_model` were
+  `gpt-4.1` (the v2.8.17 bump). Bumped to `gpt-5`. `fallback_models` now
+  includes `gpt-4.1, nvidia/nemotron-3-super-120b-a12b, grok-4,
+  deepseek/deepseek-chat`. Added full xAI (Grok) provider support —
+  `XAI_API_KEY`/`XAI_BASE_URL` settings, `_client_for`/`_default_provider`
+  wiring in `app/llm.py` (xAI is OpenAI-compatible at `api.x.ai/v1`).
+  **Note:** `primary_model`/`fallback_models` must be bare model IDs
+  (`gpt-5`, `grok-4`), not `provider/model` — `_default_provider()` matches
+  on the ID's own prefix. NVIDIA is the one real exception: its own catalog
+  IDs are genuinely namespaced (`nvidia/nemotron-...`). The old default
+  (`primary_model=openai/gpt-4.1`) was actually a **pre-existing bug**:
+  `_default_provider("openai/gpt-4.1")` doesn't match any prefix rule and
+  silently fell through to `openrouter`, so `PRIMARY_MODEL` was never
+  actually honored for the direct (non-Brain) chat path. Fixed as part of
+  this change.
+- **Cost heads-up:** gpt-5 costs substantially more per token than
+  gpt-4o-mini. Worth confirming that's the intended tradeoff before this
+  reaches production traffic.
+- **Continuity / durable memory.** The actual bug lived in Aion-Brain (see
+  its NOTES.md) — `/api/chat` there used a fresh random UUID as the memory
+  session key on every single request, so cross-turn recall never worked.
+  On this side: added `session_id` to `ChatRequest`, threaded it through
+  `brain_client.stream_chat()` to Brain's `/api/chat` (falls back to the
+  caller's `principal.subject` if the client doesn't send one yet).
+- **Streaming**: already worked end-to-end here (SSE `stream_chat` in
+  `app/llm.py`, consumed by the frontend's `consumeSse`). No changes needed
+  on this side.
+
+Verified: `pytest -q` — identical failure count before/after this diff
+(63 failed/223 passed/4 skipped both times — pre-existing, mostly
+live-provider-key-dependent). Updated
+`test_contract_openai_model_upgraded_off_mini` to assert the new gpt-5
+default (same pattern as the test itself already used for the gpt-4.1 bump).
+
 ## 2026-08-12 — AION system review (Claude)
 
 Follow-up to a health/correctness review of the backend. Fixed the issues found:

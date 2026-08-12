@@ -229,6 +229,7 @@ async def stream_chat(
     max_tokens: int = 1024,
     model: str | None = None,
     provider: str | None = None,
+    session_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream events from Brain /api/chat. Yields dicts with at least a
     `type` key matching the AION v2 SSE event contract.
@@ -242,6 +243,7 @@ async def stream_chat(
     body: dict[str, Any] = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     if model: body["model"] = model
     if provider: body["provider"] = provider
+    if session_id: body["session_id"] = session_id
     timeout = httpx.Timeout(connect=10.0, read=settings.brain_timeout_ms / 1000.0, write=10.0, pool=10.0)
     started = time.time()
     try:
