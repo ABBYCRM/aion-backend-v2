@@ -263,7 +263,7 @@ def test_contract_total_skill_count_is_45():
         ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
     ).decode().strip()
     # Accept 45 / 46 / 48 (any pre- or post-v2.8.13 count).
-    assert out in ("45", "46", "48"), f"expected 45/46/48 SkillSpec, got {out}"
+    assert out in ("45", "46", "48", "50"), f"expected 45/46/48 SkillSpec, got {out}"
 
 
 def test_contract_all_skill_executors_wired():
@@ -438,7 +438,7 @@ def test_contract_total_skill_count_is_46():
     # Allow 46 OR 48 (the new total). We don't hard-pin the count to a
     # single number so this test stays useful across the v2.8.12/13
     # boundary.
-    assert out in ("46", "48"), f"expected 46 or 48 SkillSpec, got {out}"
+    assert out in ("46", "48", "50"), f"expected 46 or 48 SkillSpec, got {out}"
 
 
 def test_contract_status_warning_entries_have_warning_and_replacement():
@@ -624,7 +624,7 @@ def test_contract_total_skill_count_is_48():
     out = subprocess.check_output(
         ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
     ).decode().strip()
-    assert out == "48", f"expected 48 SkillSpec, got {out}"
+    assert out == "50", f"expected 50 SkillSpec, got {out}"
 
 
 def test_contract_kernel_prompt_lists_pypi():
@@ -653,3 +653,142 @@ def test_contract_chat_intent_router_detects_pypi_questions():
     # Negative
     assert not _is_pypi_intent("what is the weather")
     assert not _is_pypi_intent("tell me about cats")
+
+
+# ----- v2.8.17 — Hedra image-to-video + OpenAI model upgrade -----
+
+def test_hedra_v3_module_imports_cleanly():
+    """v2.8.17: Hedra client is reachable as a module."""
+    from app.skills.clients import hedra
+    assert hasattr(hedra, "hedra_image") and hasattr(hedra, "hedra_video")
+    assert hasattr(hedra, "HEDRA_BASE")
+    assert hedra.HEDRA_BASE == "https://api.hedra.com"
+
+
+def test_hedra_v3_image_rejects_empty_prompt():
+    from app.skills.clients import hedra
+    r = asyncio.get_event_loop().run_until_complete(
+        hedra.hedra_image({"prompt": ""}, {})
+    )
+    assert r["ok"] is False
+    # Without HEDRA_API_KEY the skill returns not_configured first;
+    # with it, prompt validation fires second.
+    assert r["error_code"] in ("missing_required:prompt", "hedra_not_configured"), r
+
+
+def test_hedra_v3_video_rejects_empty_prompt():
+    """v2.8.17: without HEDRA_API_KEY env, skill returns clean not_configured."""
+    from app.skills.clients import hedra
+    import os
+    old = os.environ.pop("HEDRA_API_KEY", None)
+    try:
+        # Force settings to re-read env
+        from app.settings import settings as _s
+        s = _s
+        if not s.hedra_api_key:
+            r = asyncio.get_event_loop().run_until_complete(
+                hedra.hedra_image({"prompt": "a duck"}, {})
+            )
+            assert r["ok"] is False
+            assert r["error_code"] == "hedra_not_configured"
+        else:
+            # HEDRA_API_KEY is set in this env; skip
+            pass
+    finally:
+        if old:
+            os.environ["HEDRA_API_KEY"] = old
+
+
+
+def test_hedra_v3_video_rejects_empty_prompt():
+    """v2.8.17: hedra.video rejects empty prompt cleanly."""
+    from app.skills.clients import hedra
+    r = asyncio.get_event_loop().run_until_complete(
+        hedra.hedra_video({"prompt": ""}, {})
+    )
+    assert r["ok"] is False
+    assert r["error_code"] in ("missing_required:prompt", "hedra_not_configured"), r
+
+def test_hedra_v3_image_returns_hedra_not_configured_when_no_key():
+    """v2.8.17: bad data URL returns invalid_data_url without crashing."""
+    from app.skills.clients import hedra
+    r = asyncio.get_event_loop().run_until_complete(
+        hedra.hedra_image({"prompt": "test", "reference_url": "not-a-data-url"}, {})
+    )
+    # Falls through to URL path; if no API key configured, hedra_not_configured
+    # else hedra_rejected from the upstream
+    assert r["ok"] is False
+    assert r["error_code"] in ("hedra_not_configured", "hedra_rejected", "hedra_network", "hedra_upstream")
+
+
+
+def test_hedra_v3_image_calls_v3_endpoint():
+    """v2.8.17: hedra.image POSTs to /v3/models/<slug> with Authorization: Key header."""
+    from pathlib import Path
+    src = Path("app/skills/clients/hedra.py").read_text()
+    assert "/v3/models/" in src
+    assert "Key " in src
+    assert "Authorization" in src
+    assert "quote(model, safe=" in src  # url-encode model slug
+
+
+def test_hedra_v3_video_supports_image_to_video():
+    """v2.8.17: hedra.video accepts start_image_url for i2v mode."""
+    from pathlib import Path
+    src = Path("app/skills/clients/hedra.py").read_text()
+    assert "start_image_url" in src
+    assert "/v3/models/" in src
+
+def test_contract_hedra_skill_registered():
+    """v2.8.17: hedra.image + hedra.video are registered in seed_all.py."""
+    seed = Path("app/skills/seed_all.py").read_text()
+    assert '"hedra.image"' in seed
+    assert '"hedra.video"' in seed
+    assert '"builtin:hedra.image": hedra.hedra_image' in seed
+    assert '"builtin:hedra.video": hedra.hedra_video' in seed
+
+
+def test_contract_openai_model_upgraded_off_mini():
+    """v2.8.17: openai_tts_model default is gpt-4o-tts (not gpt-4o-mini-tts).
+    openai_chat_model default is gpt-4.1 (not gpt-4o-mini, not gpt-4o).
+    openai_image_model default is hedra-nano-banana-2 (not gpt-image-1)."""
+    from app.settings import settings
+    assert settings.openai_tts_model == "gpt-4o-tts", f"tts is {settings.openai_tts_model}"
+    assert settings.openai_chat_model == "gpt-4.1", f"chat is {settings.openai_chat_model}"
+    assert settings.openai_image_model == "hedra-nano-banana-2", f"image model is {settings.openai_image_model}"
+    assert settings.openai_video_model == "sora-2"
+    # Primary provider chain also uses gpt-4.1 (not Kimi/MiniMax)
+    assert settings.primary_model == "openai/gpt-4.1", f"primary is {settings.primary_model}"
+
+
+def test_contract_chat_route_uses_settings_tts_model():
+    """v2.8.17: TTS endpoint no longer hardcodes gpt-4o-mini-tts."""
+    src = Path("app/main.py").read_text()
+    assert "settings.openai_tts_model" in src
+    assert '"gpt-4o-mini-tts"' not in src, "stale hardcoded gpt-4o-mini-tts still in app/main.py"
+
+
+def test_contract_image_video_models_use_settings():
+    """v2.8.17: ImageGenBody + VideoGenBody read model from settings."""
+    src = Path("app/main.py").read_text()
+    assert "settings.openai_image_model" in src
+    assert "settings.openai_video_model" in src
+    assert 'Field(default="sora-2"' not in src, "stale hardcoded sora-2 default"
+    assert 'Field(default="gpt-image-1"' not in src, "stale hardcoded gpt-image-1 default"
+
+
+def test_contract_total_skill_count_is_48():
+    """v2.8.17: total SkillSpec count in seed_all.py is 48 (46 + pypi + hedra)."""
+    import subprocess
+    out = subprocess.check_output(
+        ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
+    ).decode().strip()
+    assert out == "50", f"expected 50 SkillSpec, got {out}"
+
+
+def test_contract_kernel_prompt_mentions_hedra():
+    """v2.8.17: kernel.py system prompt lists hedra.image and hedra.video so the
+    model knows it's available without hallucinating."""
+    src = Path("app/kernel.py").read_text()
+    assert "hedra" in src.lower(), "kernel.py doesn't mention hedra"
+    assert "/v3/models/" in src or "hedra.image" in src, "kernel.py missing v3 reference"

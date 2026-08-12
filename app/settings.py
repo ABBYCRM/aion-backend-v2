@@ -67,6 +67,14 @@ class Settings:
     nvidia_base_url: str
     bitdeer_api_key: str
     bitdeer_base_url: str
+    # v2.8.17 — Hedra (image-to-video + character gen) and upgraded OpenAI
+    # model defaults. Operator dropped HEDRA_API_KEY inline on 2026-08-12;
+    # also bumped default image/video/tts models off the "mini" tier.
+    hedra_api_key: str
+    openai_image_model: str
+    openai_video_model: str
+    openai_tts_model: str
+    openai_chat_model: str
     cloudflare_account_id: str
     cloudflare_api_token: str
     cloudflare_base_url: str
@@ -102,7 +110,7 @@ class Settings:
         private_key = os.getenv("GITHUB_PRIVATE_KEY", "").replace("\\n", "\n").strip()
         return cls(
             app_name=os.getenv("APP_NAME", "AION").strip() or "AION",
-            app_version=os.getenv("APP_VERSION", "2.8.16").strip() or "2.0.0",
+            app_version=os.getenv("APP_VERSION", "2.8.17").strip() or "2.0.0",
             environment=environment,
             log_level=os.getenv("LOG_LEVEL", "info").strip().lower(),
             api_keys=_csv(os.getenv("AION_API_KEYS", "")),
@@ -133,10 +141,23 @@ class Settings:
             nvidia_base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/"),
             bitdeer_api_key=os.getenv("BITDEER_API_KEY", "").strip(),
             bitdeer_base_url=os.getenv("BITDEER_BASE_URL", "https://api-inference.bitdeer.ai/v1").rstrip("/"),
+            hedra_api_key=os.getenv("HEDRA_API_KEY", "").strip(),
+            # v2.8.17 — operator said "upgrade the open ai model to something
+            # decent not a mini" + "I don't want open ai image gen I want hedra".
+            # Defaults:
+            #   chat  → gpt-4.1  (OpenAI's flagship 2026, not mini)
+            #   tts   → gpt-4o-tts (full, not mini)
+            #   image → hedra-nano-banana-2 (Google's character-consistency model, runs natively in Hedra)
+            #   video → sora-2 (still the best OpenAI video, also in Hedra as sora-2-pro)
+            # Env vars can still override any of these.
+            openai_image_model=os.getenv("OPENAI_IMAGE_MODEL", "hedra-nano-banana-2").strip(),
+            openai_video_model=os.getenv("OPENAI_VIDEO_MODEL", "sora-2").strip(),
+            openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-tts").strip(),
+            openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1").strip(),
             cloudflare_account_id=os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip(),
             cloudflare_api_token=os.getenv("CLOUDFLARE_API_TOKEN", "").strip(),
             cloudflare_base_url=os.getenv("CLOUDFLARE_BASE_URL", "").rstrip("/"),
-            primary_model=os.getenv("PRIMARY_MODEL", "moonshotai/kimi-k3").strip(),
+            primary_model=os.getenv("PRIMARY_MODEL", "openai/gpt-4.1").strip(),
             fallback_models=_csv(os.getenv("FALLBACK_MODELS", "nvidia/nemotron-3-super-120b-a12b,deepseek/deepseek-chat")),
             brave_api_key=os.getenv("BRAVE_API_KEY", "").strip(),
             brave_base_url=os.getenv("BRAVE_BASE_URL", "https://api.search.brave.com/res/v1/web/search").strip(),

@@ -660,7 +660,7 @@ async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, timeout=settings.request_timeout_seconds)
-        response = await client.audio.speech.create(model="gpt-4o-mini-tts", voice=voice, input=text, response_format=fmt)
+        response = await client.audio.speech.create(model=settings.openai_tts_model, voice=voice, input=text, response_format=fmt)
         audio_bytes = response.read()
         import base64
         return {"ok": True, "mode": "server", "text": text, "voice": voice, "format": fmt, "audio_b64": base64.b64encode(audio_bytes).decode("ascii"), "size_bytes": len(audio_bytes)}
@@ -672,13 +672,70 @@ async def tts(body: dict[str, Any], _: Principal = Depends(authenticated)):
 
 class ImageGenBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
-    model: str = Field(default="gpt-image-1", max_length=80)
+    model: str = Field(default_factory=lambda: settings.openai_image_model, max_length=80)
     size: str = Field(default="1024x1024", max_length=20)
     n: int = Field(default=1, ge=1, le=4)
 
 
 @app.post("/api/image/generate")
 async def image_generate(body: ImageGenBody, principal: Principal = Depends(authenticated)):
+    # v2.8.17 — route to Hedra when the model is a Hedra slug.
+    # Operator said "I don't want openai image gen I want hedra".
+    # We default to Hedra nano-banana-2 (Google's flagship character
+    # consistency model, runs natively in Hedra).
+    is_hedra = body.model.startswith("hedra-") or not body.model.startswith("gpt-")
+    if is_hedra:
+        from .skills.clients import hedra as _hedra
+        audit.record("image.generate.started", {"subject": principal.subject, "model": body.model, "backend": "hedra", "prompt_hash": _hash_text(body.prompt)})
+        # If the user passed a plain "nano-banana-2" style slug, keep it.
+        # If they passed "hedra-nano-banana-2", strip the prefix.
+        hedra_model = body.model.removeprefix("hedra-") if body.model.startswith("hedra-") else body.model
+        # Map our "WxH" size to an aspect ratio
+        aspect = "1:1"
+        try:
+            w_str, h_str = body.size.lower().split("x", 1)
+            w, h = int(w_str), int(h_str)
+            ar = w / h
+            if abs(ar - 16/9) < 0.05: aspect = "16:9"
+            elif abs(ar - 9/16) < 0.05: aspect = "9:16"
+            elif abs(ar - 4/3) < 0.05: aspect = "4:3"
+            elif abs(ar - 3/4) < 0.05: aspect = "3:4"
+        except Exception: pass
+        result = await _hedra.hedra_image(
+            {"prompt": body.prompt, "model": hedra_model,
+             "aspect_ratio": aspect, "n": body.n, "poll": True,
+             "poll_timeout_seconds": 180}, {})
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error_message", "hedra_failed"),
+                    "kind": "image_error", "model": body.model, "items": [],
+                    "backend": "hedra", "error_code": result.get("error_code"),
+                    "raw": result.get("raw", "")[:300]}
+        # Convert hedra output to the same items[] shape OpenAI returns
+        items: list[dict[str, Any]] = []
+        gallery_ids: list[str] = []
+        urls = result.get("image_urls") or ([result.get("image_url")] if result.get("image_url") else [])
+        for idx, url in enumerate(urls):
+            record: dict[str, Any] = {"url": url, "revised_prompt": None}
+            items.append(record)
+            try:
+                w, h = _parse_size(body.size) if "x" in body.size else (None, None)
+                gal = gallery.add(
+                    owner=principal.subject, kind="image", source="hedra",
+                    mime="image/png",
+                    filename=f"image_{int(time.time())}_{idx}.png",
+                    prompt=body.prompt, model=hedra_model, size=body.size,
+                    width=w, height=h,
+                    b64=None, external_url=url,
+                    metadata={"hedra_job_id": result.get("job_id"), "aspect_ratio": aspect},
+                )
+                record["gallery_id"] = gal.id
+                gallery_ids.append(gal.id)
+            except Exception as exc:
+                audit.record("gallery.persist_failed", {"subject": principal.subject, "model": body.model, "error": str(exc)[:200]})
+        audit.record("image.generate.succeeded", {"subject": principal.subject, "model": body.model, "backend": "hedra", "count": len(items), "gallery_ids": gallery_ids})
+        return {"ok": True, "model": body.model, "items": items, "count": len(items), "gallery_ids": gallery_ids, "backend": "hedra"}
+    # OpenAI path (legacy — operator said don't use it as default, but
+    # the endpoint still supports gpt-image-* for callers who want it).
     if not settings.openai_api_key: return {"ok": False, "error": "openai_not_configured", "model": body.model}
     audit.record("image.generate.started", {"subject": principal.subject, "model": body.model, "size": body.size, "n": body.n, "prompt_hash": _hash_text(body.prompt)})
     try:
@@ -722,7 +779,7 @@ async def image_generate(body: ImageGenBody, principal: Principal = Depends(auth
 
 class VideoGenBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
-    model: str = Field(default="sora-2", max_length=80)
+    model: str = Field(default_factory=lambda: settings.openai_video_model, max_length=80)
     seconds: int = Field(default=4, ge=2, le=20)
     size: str = Field(default="1280x720", max_length=20)
     input_reference: str | None = Field(default=None, max_length=2_000_000)
