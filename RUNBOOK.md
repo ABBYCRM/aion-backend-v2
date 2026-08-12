@@ -321,7 +321,7 @@ Step 2: Check Brain. If AION_BRAIN_API_KEY is set and Brain
         is slow, the chat waits. Disable with
         AION_BRAIN_ENABLED=false to confirm.
 
-Step 3: Check the model. gpt-4o-mini is the default. If a
+Step 3: Check the model. gpt-4.1 is the default. If a
         failover to grok-4.5 / claude-sonnet-5 happens
         mid-turn, the latency profile changes. Check
         /api/models/all to see the failover chain.

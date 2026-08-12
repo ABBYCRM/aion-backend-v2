@@ -24,7 +24,7 @@ services:
         scope: RUN_TIME
         type: GENERAL
       - key: APP_VERSION
-        value: 2.8.12
+        value: 2.8.17
         scope: RUN_TIME
         type: GENERAL
       - key: ENVIRONMENT
