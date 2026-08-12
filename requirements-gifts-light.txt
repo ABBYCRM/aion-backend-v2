@@ -1,0 +1,12 @@
+# PyPI Gift Batch (2026-08-12) — LAYER 1: lightweight, MUST install.
+# No torch, no playwright, no selenium, no vllm. Fits in DO basic-xxs.
+fastapi-rag==0.1.1
+igramscraper==0.3.5
+facebook-scraper==0.2.59
+agentpack-skills==0.1.0
+exocortex-llm-router==0.1.1
+agent-tool-router==0.4.0
+tool-router-ai==0.3.0
+semantic-tool-router==0.3.0
+# facebook-scraper compat (lxml.html.clean was extracted into a separate project)
+lxml_html_clean>=0.1.0
