@@ -65,6 +65,8 @@ class Settings:
     openai_base_url: str
     nvidia_api_key: str
     nvidia_base_url: str
+    xai_api_key: str
+    xai_base_url: str
     bitdeer_api_key: str
     bitdeer_base_url: str
     # v2.8.17 — Hedra (image-to-video + character gen) and upgraded OpenAI
@@ -139,13 +141,15 @@ class Settings:
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             nvidia_api_key=os.getenv("NVIDIA_API_KEY", "").strip(),
             nvidia_base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/"),
+            xai_api_key=os.getenv("XAI_API_KEY", "").strip(),
+            xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/"),
             bitdeer_api_key=os.getenv("BITDEER_API_KEY", "").strip(),
             bitdeer_base_url=os.getenv("BITDEER_BASE_URL", "https://api-inference.bitdeer.ai/v1").rstrip("/"),
             hedra_api_key=os.getenv("HEDRA_API_KEY", "").strip(),
-            # v2.8.17 — operator said "upgrade the open ai model to something
-            # decent not a mini" + "I don't want open ai image gen I want hedra".
+            # v2.8.18 — operator said "I need a stronger model than chat gpt
+            # mini" and named nvidia + xai as available alternatives.
             # Defaults:
-            #   chat  → gpt-4.1  (OpenAI's flagship 2026, not mini)
+            #   chat  → gpt-5 (OpenAI's flagship, not mini, not gpt-4.1)
             #   tts   → gpt-4o-tts (full, not mini)
             #   image → hedra-nano-banana-2 (Google's character-consistency model, runs natively in Hedra)
             #   video → sora-2 (still the best OpenAI video, also in Hedra as sora-2-pro)
@@ -153,12 +157,16 @@ class Settings:
             openai_image_model=os.getenv("OPENAI_IMAGE_MODEL", "hedra-nano-banana-2").strip(),
             openai_video_model=os.getenv("OPENAI_VIDEO_MODEL", "sora-2").strip(),
             openai_tts_model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-tts").strip(),
-            openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1").strip(),
+            openai_chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-5").strip(),
             cloudflare_account_id=os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip(),
             cloudflare_api_token=os.getenv("CLOUDFLARE_API_TOKEN", "").strip(),
             cloudflare_base_url=os.getenv("CLOUDFLARE_BASE_URL", "").rstrip("/"),
-            primary_model=os.getenv("PRIMARY_MODEL", "openai/gpt-4.1").strip(),
-            fallback_models=_csv(os.getenv("FALLBACK_MODELS", "nvidia/nemotron-3-super-120b-a12b,deepseek/deepseek-chat")),
+            # NOTE: bare model IDs here, not "provider/model" — _default_provider()
+            # in llm.py matches on the model ID's own prefix (gpt-, grok-, claude-,
+            # deepseek-, etc). NVIDIA is the one exception: its own catalog IDs are
+            # genuinely namespaced ("nvidia/nemotron-..."), so that prefix is real.
+            primary_model=os.getenv("PRIMARY_MODEL", "gpt-5").strip(),
+            fallback_models=_csv(os.getenv("FALLBACK_MODELS", "gpt-4.1,nvidia/nemotron-3-super-120b-a12b,grok-4,deepseek/deepseek-chat")),
             brave_api_key=os.getenv("BRAVE_API_KEY", "").strip(),
             brave_base_url=os.getenv("BRAVE_BASE_URL", "https://api.search.brave.com/res/v1/web/search").strip(),
             web_search_max_results=_int("WEB_SEARCH_MAX_RESULTS", 12, minimum=1, maximum=20),

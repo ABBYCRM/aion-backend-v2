@@ -84,6 +84,11 @@ class ChatRequest(BaseModel):
     # "Step N of M." to the reply.
     step: str | None = Field(default=None, max_length=40)
     total_steps: int | None = Field(default=None, ge=1, le=100)
+    # Stable per-conversation ID (frontend generates one and reuses it for
+    # every turn). Threaded through to Brain so its durable memory (episodes/
+    # facts/goals) can actually be recalled across turns instead of every
+    # request landing in a throwaway, never-reused session.
+    session_id: str | None = Field(default=None, max_length=200)
     @model_validator(mode="after")
     def pair(self):
         if bool(self.model) != bool(self.provider): raise ValueError("provider_and_model_are_required_together")
@@ -1431,7 +1436,7 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                 _brain_mirror_provider: str = body.provider or ""
                 _brain_mirror_model: str = body.model or ""
                 async with limiter.chat_slot():
-                    async for evt in brain_client.stream_chat(messages=brain_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
+                    async for evt in brain_client.stream_chat(messages=brain_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider, session_id=body.session_id or principal.subject):
                         evt_type = evt.get("type")
                         if evt_type == "open":
                             _brain_mirror_provider = evt.get("provider", "") or _brain_mirror_provider

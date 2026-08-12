@@ -749,16 +749,18 @@ def test_contract_hedra_skill_registered():
 
 
 def test_contract_openai_model_upgraded_off_mini():
-    """v2.8.17: openai_tts_model default is gpt-4o-tts (not gpt-4o-mini-tts).
-    openai_chat_model default is gpt-4.1 (not gpt-4o-mini, not gpt-4o).
+    """v2.8.18: openai_tts_model default is gpt-4o-tts (not gpt-4o-mini-tts).
+    openai_chat_model default is gpt-5 (not gpt-4o-mini, not gpt-4o, not gpt-4.1 —
+    operator asked for something stronger than the v2.8.17 gpt-4.1 default).
     openai_image_model default is hedra-nano-banana-2 (not gpt-image-1)."""
     from app.settings import settings
     assert settings.openai_tts_model == "gpt-4o-tts", f"tts is {settings.openai_tts_model}"
-    assert settings.openai_chat_model == "gpt-4.1", f"chat is {settings.openai_chat_model}"
+    assert settings.openai_chat_model == "gpt-5", f"chat is {settings.openai_chat_model}"
     assert settings.openai_image_model == "hedra-nano-banana-2", f"image model is {settings.openai_image_model}"
     assert settings.openai_video_model == "sora-2"
-    # Primary provider chain also uses gpt-4.1 (not Kimi/MiniMax)
-    assert settings.primary_model == "openai/gpt-4.1", f"primary is {settings.primary_model}"
+    # Primary provider chain also uses gpt-5. Bare model ID (not "openai/gpt-5")
+    # — _default_provider() in llm.py matches on the model ID's own prefix.
+    assert settings.primary_model == "gpt-5", f"primary is {settings.primary_model}"
 
 
 def test_contract_chat_route_uses_settings_tts_model():
