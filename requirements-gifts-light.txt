@@ -8,5 +8,8 @@ exocortex-llm-router==0.1.1
 agent-tool-router==0.4.0
 tool-router-ai==0.3.0
 semantic-tool-router==0.3.0
+# v2.8.15 — operator's 2nd drop on 2026-08-12 (still Christmas)
+how-agentic==0.1.1
+isage-agentic==0.1.0.5
 # facebook-scraper compat (lxml.html.clean was extracted into a separate project)
 lxml_html_clean>=0.1.0

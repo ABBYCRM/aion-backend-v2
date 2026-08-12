@@ -1139,9 +1139,21 @@
           "version": "0.3.0",
           "aion_relevance": 3,
           "note": "Many-Tool problem solver, hybrid BM25+embeddings"
+        },
+        {
+          "name": "how-agentic",
+          "version": "0.1.1",
+          "aion_relevance": 2,
+          "note": "tutorial-first agent training framework"
+        },
+        {
+          "name": "isage-agentic",
+          "version": "0.1.0.5",
+          "aion_relevance": 3,
+          "note": "SAGE agentic framework — planning + tool selection"
         }
       ],
-      "notes": "Operator message: 'digest ingest and install all'. Heavy packages (fluxflow-training, finance-data-llm, evolvishub-text-classification-llm) are installable on operator opt-in only — they would 1-3x the DO image size. Lightweight packages (igramscraper, agentpack-skills, exocortex-llm-router, agent-tool-router, tool-router-ai, semantic-tool-router) install cleanly into DO basic 1GB image. See data/requirements-gifts.txt for the lightweight install set."
+      "notes": "v2.8.15 — 16 packages total. Operator message: 'digest ingest and install all'. 2 of 16 (how-agentic, isage-agentic) are from a follow-up drop the same day. Heavy packages (fluxflow-training torch+diffusers, finance-data-llm with vllm dep) tried in install-gifts-heavy.sh with cleanup-on-fail. Build may exhaust basic-xxs build memory — see /var/data/gifts_install.log on live. data/requirements-gifts-light.txt has the 10 always-install packages. data/requirements-gifts-heavy.txt has the 6 best-effort packages."
     }
   ]
 }

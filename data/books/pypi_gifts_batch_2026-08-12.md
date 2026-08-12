@@ -1,10 +1,10 @@
 # PyPI Gift Batch — Tier-1 Source (2026-08-12)
 
-This digest is the operator-curated bundle of 14 PyPI packages dropped
-into `/workspace/attachments/` on 2026-08-12. All 15 were verified live
-on https://pypi.org via AION's `pypi.lookup` skill at the same versions
-in this document. The operator message accompanying the gift was
-"digest ingest and install all".
+This digest is the operator-curated bundle of 16 PyPI packages dropped
+into `/workspace/attachments/` on 2026-08-12 (Christmas batch + a follow-up
+drop the same day). All 16 were verified live on https://pypi.org via AION's
+`pypi.lookup` skill at the same versions in this document. The operator
+message accompanying the gifts was "digest ingest and install all".
 
 ## How to read this document
 
@@ -25,7 +25,7 @@ Per-package section contains:
 
 ## Verdict map
 
-- `fastapi-rag==0.1.1` — ✓ install — AION-relevance 1/3- `browser-automation-cli==0.2.1` — ⚠ opt-in — AION-relevance 3/3- `evolvishub-text-classification-llm==1.1.0` — ⚠ opt-in — AION-relevance 1/3- `facebook-scraper==0.2.59` — ✓ install — AION-relevance 0/3- `linkedin-scraper==3.1.2` — ⚠ opt-in — AION-relevance 0/3- `igramscraper==0.3.5` — ✓ install — AION-relevance 0/3- `finance-data-llm==0.1.13` — ⚠ opt-in — AION-relevance 0/3- `fluxflow-training==0.8.1` — ⚠ opt-in — AION-relevance 0/3- `instagram-posts-scraper==0.1.0` — ⚠ opt-in — AION-relevance 0/3- `exocortex-llm-router==0.1.1` — ✓ install — AION-relevance 3/3- `agentpack-skills==0.1.0` — ✓ install — AION-relevance 2/3- `agent-tool-router==0.4.0` — ✓ install — AION-relevance 3/3- `tool-router-ai==0.3.0` — ✓ install — AION-relevance 2/3- `semantic-tool-router==0.3.0` — ✓ install — AION-relevance 3/3
+- `fastapi-rag==0.1.1` — ✓ install — AION-relevance 1/3- `browser-automation-cli==0.2.1` — ⚠ opt-in — AION-relevance 3/3- `evolvishub-text-classification-llm==1.1.0` — ⚠ opt-in — AION-relevance 1/3- `facebook-scraper==0.2.59` — ✓ install — AION-relevance 0/3- `linkedin-scraper==3.1.2` — ⚠ opt-in — AION-relevance 0/3- `igramscraper==0.3.5` — ✓ install — AION-relevance 0/3- `finance-data-llm==0.1.13` — ⚠ opt-in — AION-relevance 0/3- `fluxflow-training==0.8.1` — ⚠ opt-in — AION-relevance 0/3- `instagram-posts-scraper==0.1.0` — ⚠ opt-in — AION-relevance 0/3- `exocortex-llm-router==0.1.1` — ✓ install — AION-relevance 3/3- `agentpack-skills==0.1.0` — ✓ install — AION-relevance 2/3- `agent-tool-router==0.4.0` — ✓ install — AION-relevance 3/3- `tool-router-ai==0.3.0` — ✓ install — AION-relevance 2/3- `semantic-tool-router==0.3.0` — ✓ install — AION-relevance 3/3- `how-agentic==0.1.1` — ✓ install — AION-relevance 2/3- `isage-agentic==0.1.0.5` — ✓ install — AION-relevance 3/3
 ---
 
 ## fastapi-rag==0.1.1
@@ -2176,6 +2176,357 @@ Query a local JSON registry of tool specs:
 
 ```bash
 python -m semantic_tool_router discover "read the
+```
+
+
+---
+
+## how-agentic==0.1.1
+
+**[✓ live on PyPI, ✓ installable, AION-relevance 2/3]**
+
+- **Summary:** Tutorial-first framework for training a small agent model from scratch.
+- **PyPI:** https://pypi.org/project/how-agentic/
+- **Install:** `pip install how-agentic==0.1.1`
+
+### README (README.md)
+
+```
+# How-Agentic
+
+How-Agentic is a tutorial-first framework for training a small agent model from scratch.
+
+The current release is the **M0 closed-loop baseline**. It is intentionally small and practical: the goal is to make the full path reproducible before moving on to more agentic behavior training.
+
+```text
+tokenizer -> pretrain -> format-only SFT -> export -> infer -> HuggingFace-compatible export
+```
+
+## M0 Status
+
+M0 is complete and frozen.
+
+- Pretrained checkpoint: `out/hello_agent_100m/pretrain/final.pt`
+- SFT checkpoint: `out/hello_agent_100m/sft/final.pt`
+- Tokenizer: `tokenizers/hello-agent-16k`
+- Pretrain data: `data/demo/m0_pretrain_100k.jsonl`
+- SFT data: `data/demo/m0_sft_format_500.jsonl`
+- Pretrain infer mode: `completion`
+- SFT infer mode: `chat`
+
+Model checkpoints and datasets are not included in the PyPI package.
+
+## Install
+
+Minimal CLI install:
+
+```bash
+pip install how-agentic
+```
+
+M0 training environment, verified on Python 3.12 + CUDA 12.4:
+
+```bash
+pip install -r requirements/m0-py312-cu124.txt
+pip install -e . --no-deps
+```
+
+Or with uv:
+
+```bash
+uv venv .venv --python 3.12
+uv pip install -r requirements/m0-py312-cu124.txt
+uv pip install -e . --no-deps
+```
+
+## CLI
+
+```bash
+python -m how_agentic.cli --help
+```
+
+or:
+
+```bash
+how-agentic --help
+```
+
+## M0 Quick Path
+
+Train tokenizer:
+
+```bash
+python -m how_agentic.cli train-tokenizer --data data/demo/m0_pretrain_100k.jsonl --output tokenizers/hello-agent-16k --vocab-size 16000
+```
+
+Pretrain:
+
+```bash
+python -m how_agentic.cli train --config configs/hello_agent_pretrain_100k.yaml
+```
+
+Export pretrained model:
+
+```bash
+python -m how_agentic.cli export --checkpoint out/hello_agent_100m/pretrain/final.pt --output models/hello_agent_100m_native
+```
+
+Infer with pretrained model:
+
+```bash
+python -m how_agentic.cli infer --model models/hello_agent_100m_native --prompt "Once upon a time" --mode completion --max-tokens 50 --temperature 0
+```
+
+Build M0 format-only SFT data:
+
+```bash
+python scripts/build_m0_format_sft_dataset.py --output data/demo/m0_sft_format_500.jsonl --total 500 --seed 42
+```
+
+Run M0 SFT:
+
+```bash
+python -m how_agentic.cli train --config configs/hello_agent_sft.yaml
+```
+
+Export SFT model:
+
+```bash
+python -m how_agentic.cli export --checkpoint out/hello_agent_100m/sft/final.pt --output models/hello_agent_100m_sft_native
+```
+
+Infer with SFT model:
+
+```bash
+python -m how_agentic.cli infer --model models/hello_agent_100m_sft_native --prompt "What is the capital of France?" --mode chat --max-tokens 80 --temperature 0
+```
+
+Expected shape:
+
+```text
+<answer>
+The capital of France is Paris.
+</answer>
+```
+
+## Docs
+
+Quickstart:
+
+```text
+docs/quickstart.md
+```
+
+M0 reproduction:
+
+```text
+docs/m0-reproduction.md
+```
+
+CLI reference:
+
+```text
+docs/cli-reference.md
+```
+
+Configuration guide:
+
+```text
+docs/configuration.md
+```
+
+Roadmap:
+
+```text
+docs/roadmap.md
+```
+
+Publishing:
+
+```text
+docs/publishing.md
+```
+
+## Package Boundary
+
+PyPI contains the framework code and CLI.
+
+The following are intentionally kept outside the wheel:
+
+- checkpoints
+- exported models
+- tokenizer artifacts
+- training data
+- logs
+- local caches
+
+Use HuggingFace Hub for model weights and GitHub for reproducibility docs, configs, scripts, and tests.
+
+## License
+
+This project is licensed under **CC BY-NC-SA 4.0**.
+
+Attribution is required, commercial use is not allowed, and derivative works must use the same license.
+
+```
+
+
+---
+
+## isage-agentic==0.1.0.5
+
+**[✓ live on PyPI, ✓ installable, AION-relevance 3/3]**
+
+- **Summary:** SAGE Agentic Framework — agent framework, planning, tool selection, and workflow.
+- **PyPI:** https://pypi.org/project/isage-agentic/
+- **Install:** `pip install isage-agentic==0.1.0.5`
+
+### README (README.md)
+
+```
+# SAGE Agentic Framework
+
+**Independent package for agentic AI capabilities: tool selection, planning, workflows, and agent coordination**
+
+[![PyPI version](https://badge.fury.io/py/isage-agentic.svg)](https://badge.fury.io/py/isage-agentic)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+## 🎯 Overview
+
+`sage-agentic` provides a comprehensive framework for building agentic AI systems with:
+
+- **Tool Selection**: Multiple strategies (keyword, embedding, hybrid, DFS-DT, Gorilla)
+- **Planning Algorithms**: ReAct, Tree of Thoughts (ToT), hierarchical planning
+- **Workflow Management**: Workflow orchestration and optimization
+- **Agent Coordination**: Multi-agent collaboration and registry
+- **SIAS**: Sample-Importance-Aware Selection for tool/trajectory curation
+- **Reasoning**: Advanced reasoning capabilities and timing decisions
+
+## 📦 Installation
+
+```bash
+# Basic installation
+pip install isage-agentic
+
+# With LLM support
+pip install isage-agentic[llm]
+
+# Development installation
+pip install isage-agentic[dev]
+```
+
+## �� Quick Start
+
+### Tool Selection
+
+```python
+from sage_agentic.agents.action.tool_selection import HybridToolSelector
+
+# Create selector
+selector = HybridToolSelector(embedder=your_embedder)
+
+# Select tools
+tools = selector.select(
+    query="search for research papers",
+    available_tools=all_tools,
+    k=3
+)
+```
+
+### Planning
+
+```python
+from sage_agentic.agents.planning import ReActPlanner
+
+# Create planner
+planner = ReActPlanner(llm=your_llm_client)
+
+# Generate plan
+plan = planner.plan(
+    task="Analyze this document and summarize key findings",
+    context={"document": doc_content}
+)
+```
+
+### Workflow Management
+
+```python
+from sage_agentic.workflow import WorkflowEngine
+
+# Create workflow
+workflow = WorkflowEngine()
+
+# Register and execute workflows
+workflow.register("data_pipeline", pipeline_config)
+result = workflow.execute("data_pipeline", inputs=data)
+```
+
+## 📚 Key Components
+
+### 1. **Planning** (`agents/planning/`)
+
+Planning algorithms and strategies:
+
+- **ToT (Tree of Thoughts)**: Multi-path reasoning with backtracking
+- **ReAct**: Reasoning + Acting interleaved execution
+- **Hierarchical Planner**: Hierarchical task decomposition
+- **Dependency Graph**: Task dependency management
+- **Timing Decider**: Execution timing optimization
+
+### 2. **Tool Selection** (`agents/action/tool_selection/`)
+
+Tool selection strategies:
+
+- **Keyword Selector**: Rule-based keyword matching
+- **Embedding Selector**: Semantic similarity-based selection
+- **Hybrid Selector**: Combined keyword + embedding approach
+- **DFS-DT Selector**: Decision tree-based selection
+- **Gorilla Adapter**: Gorilla-style tool retrieval
+
+### 3. **SIAS** (`sias/`)
+
+Sample-Importance-Aware Selection for:
+- Tool selection optimization
+- Trajectory curation
+- Continual learning with core-set selection
+
+### 4. **Evaluation** (`eval/`)
+
+Agent evaluation capabilities:
+- Metrics tracking
+- Determinism testing
+- Telemetry and monitoring
+
+### 5. **Interfaces & Registry** (`interface/`, `registry/`)
+
+Unified interfaces and registration system for:
+- Planners
+- Tool selectors
+- Workflows
+- Agents
+
+## 🔧 Architecture
+
+```
+sage_agentic/
+├── agents/                 # Agent implementations
+│   ├── action/            # Action and tool selection
+│   ├── planning/          # Planning algorithms
+│   └── intent/            # Intent detection
+├── workflow/              # Workflow orchestration
+├── sias/                  # Sample-Importance-Aware Selection
+├── reasoning/             # Reasoning capabilities
+├── eval/                  # Evaluation tools
+├── interface/             # Protocol definitions
+├── interface/             # Protocols, registries, schemas
+└── registry/              # Component registry
+```
+
+## 🎓 Use Cases
+
+1. **Multi-Agent Systems**: Build coordinated multi-agent workflows
+2. **Too
 ```
 
 

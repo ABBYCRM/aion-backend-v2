@@ -1232,5 +1232,29 @@
     "aion_relevance": 3,
     "weight": 1.0,
     "mcp": true
+  },
+  {
+    "name": "how-agentic",
+    "version": "0.1.1",
+    "repo": "https://github.com/howagentic/how-agentic",
+    "best_for": "Tutorial-first framework for training a small agent model from scratch. Core dep = just pyyaml; [train] extras bring in torch + transformers.",
+    "section": "tier1_pypi",
+    "primary_language": "python",
+    "in_gdy": false,
+    "from_local": true,
+    "aion_relevance": 2,
+    "weight": 1.0
+  },
+  {
+    "name": "isage-agentic",
+    "version": "0.1.0.5",
+    "repo": "https://github.com/intellistream/sage-agentic",
+    "best_for": "SAGE Agentic Framework — agent framework, planning, tool selection, and workflow.",
+    "section": "tier1_pypi",
+    "primary_language": "python",
+    "in_gdy": false,
+    "from_local": true,
+    "aion_relevance": 3,
+    "weight": 1.0
   }
 ]

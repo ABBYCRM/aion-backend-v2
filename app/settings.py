@@ -102,7 +102,7 @@ class Settings:
         private_key = os.getenv("GITHUB_PRIVATE_KEY", "").replace("\\n", "\n").strip()
         return cls(
             app_name=os.getenv("APP_NAME", "AION").strip() or "AION",
-            app_version=os.getenv("APP_VERSION", "2.8.14").strip() or "2.0.0",
+            app_version=os.getenv("APP_VERSION", "2.8.15").strip() or "2.0.0",
             environment=environment,
             log_level=os.getenv("LOG_LEVEL", "info").strip().lower(),
             api_keys=_csv(os.getenv("AION_API_KEYS", "")),
