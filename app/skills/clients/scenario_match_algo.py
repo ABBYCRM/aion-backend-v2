@@ -35,7 +35,7 @@ _ERROR_HINTS = frozenset(
     }
 )
 
-_STATUS_RE = re.compile(r"\b([1-5][0-9]{2})\b")
+_STATUS_RE = re.compile(r"(?:^|[^0-9])([1-5][0-9]{2})(?:[^0-9]|$)")
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
@@ -61,12 +61,23 @@ def _context_tokens(context: Optional[Dict[str, Any]]) -> frozenset:
     for k, v in context.items():
         if v is None:
             continue
+        sval = str(v)
         parts.append(str(k))
-        parts.append(str(v))
+        parts.append(sval)
+        # Pull 3-digit HTTP status codes out of compound tokens like
+        # "github_http_404" so the status_code_boost in score_row
+        # actually fires. Without this, an error string like
+        # "github_http_404 on LITPP/Linkedin-API" tokenizes to
+        # {github_http_404, litpp/linkedin-api} and never matches
+        # the row's {404} trigger or condition.
+        for m in _STATUS_RE.finditer(sval):
+            parts.append(m.group(1))
         if isinstance(v, dict):
             for kk, vv in v.items():
                 parts.append(str(kk))
                 parts.append(str(vv))
+                for m in _STATUS_RE.finditer(str(vv)):
+                    parts.append(m.group(1))
     return tokenize(" ".join(parts))
 
 

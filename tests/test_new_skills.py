@@ -465,3 +465,61 @@ def test_gdy_meta_catalog_search_returns_warning_when_archived():
     assert roo is not None, "RooCodeInc/Roo-Code not in hits"
     assert roo.get("warning", "").startswith("archived")
     assert roo.get("replaced_by") == "RooCodeInc/Roomote"
+
+
+# ----- chat-gate: 404/401/403/5xx github errors must not DEFER -----
+
+def test_chat_gate_resolves_github_404_to_specific_policy():
+    """v2.8.12 patch 3: the user's exact case 'github_http_404 on LITPP/Linkedin-API'
+    must not DEFER. The new GH-0501..GH-0504 rows cover the 4 most common
+    GitHub API HTTP error cases. min_score was also lowered from 5.0 to 1.25
+    so short error strings don't fall through to the hard DEFER."""
+    from app.skills.scenario_integration import policy_for_tool_error
+    cases = [
+        ("github_http_404 on LITPP/Linkedin-API", "GH-0501"),  # 404
+        ("github_http_401 unauthorized token", "GH-0502"),     # 401
+        ("github_http_403 forbidden rate limit", "GH-0503"),   # 403
+        ("github_http_500 internal server error", "GH-0504"),  # 5xx
+    ]
+    for error_text, expected_top_id in cases:
+        r = policy_for_tool_error(tool_name="github", error_text=error_text)
+        assert r["deferred"] is False, f"should not DEFER for {error_text!r}"
+        assert r["matches"], f"must have at least one match for {error_text!r}"
+        # The new generic row is in the top 3 (not necessarily #1 because
+        # GH-0504 (5xx) has a wider token overlap than GH-0501 (404))
+        top3_ids = [m["id"] for m in r["matches"][:3]]
+        assert expected_top_id in top3_ids, (
+            f"expected {expected_top_id} in top 3 for {error_text!r}, got {top3_ids}"
+        )
+
+
+def test_chat_gate_min_score_is_1_25_by_default():
+    """v2.8.12 patch 3: policy_for_tool_error default min_score is 1.25,
+    not 5.0. 5.0 was set when the chat-gate was strict; short error strings
+    could not clear 5.0 even with a 50% token match, so the model
+    always got a hard DEFER."""
+    import inspect
+    from app.skills.scenario_integration import policy_for_tool_error
+    sig = inspect.signature(policy_for_tool_error)
+    assert sig.parameters["min_score"].default == 1.25, (
+        f"default min_score should be 1.25, got {sig.parameters['min_score'].default}"
+    )
+
+
+def test_chat_gate_specific_404_row_exists():
+    """v2.8.12 patch 3: GH-0501 is the dedicated 404 row in github_scenarios.csv.
+    Its trigger mentions both '404' and 'not_found' so tokenization hits
+    the 3-token floor for a typical 404 error string."""
+    import csv
+    with open("data/scenarios/github_scenarios.csv") as f:
+        for r in csv.DictReader(f):
+            if r["id"] == "GH-0501":
+                assert "404" in r["trigger"], f"GH-0501 trigger must mention 404: {r['trigger']}"
+                assert "not_found" in r["trigger"] or "not found" in r["trigger"], (
+                    f"GH-0501 trigger must mention not_found: {r['trigger']}"
+                )
+                assert "GITHUB_ALLOWED_REPOSITORIES" in r["else_action"], (
+                    "GH-0501 else_action must tell the operator to add the repo to GITHUB_ALLOWED_REPOSITORIES"
+                )
+                return
+    assert False, "GH-0501 not found in github_scenarios.csv"

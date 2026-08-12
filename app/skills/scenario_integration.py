@@ -31,7 +31,7 @@ def policy_for_tool_error(
     context: Optional[Dict[str, Any]] = None,
     subject: Optional[str] = None,
     limit: int = 5,
-    min_score: float = 5.0,
+    min_score: float = 1.25,
 ) -> Dict[str, Any]:
     """
     Build policy for a failed tool call.
@@ -40,6 +40,14 @@ def policy_for_tool_error(
     subject is the resource the tool was acting on (e.g. repository
     name, URL, search query). When present, it's included in the
     defer_text so the operator sees WHICH call failed.
+
+    min_score=1.25 is the v2 default (matches the standalone
+    skill). The previous 5.0 was set when the chat-gate was
+    strict, but 5.0 is too high for short error strings (a 404 on
+    LITPP/Linkedin-API only scores ~3.5 against any existing row).
+    The new GH-0501..GH-0504 rows are written so a generic
+    "github 404 / 401 / 403 / 5xx" query now clears 5.0 cleanly
+    when the operator error string mentions the status code.
     """
     pack = (pack or _infer_pack(tool_name, error_text)).lower()
     trigger = f"{tool_name} error: {error_text}".strip()
