@@ -51,14 +51,30 @@ def policy_for_tool_error(
     """
     pack = (pack or _infer_pack(tool_name, error_text)).lower()
     trigger = f"{tool_name} error: {error_text}".strip()
+    ctx = dict(context or {"tool": tool_name, "error": error_text})
+    # v2.8.13: when the tool name is unknown, _infer_pack returned "all"
+    # and aion_stack's tool_policy rows would match noise. Mark this in
+    # the context so the matcher deprioritizes aion_stack rows.
+    if pack == "all" and not (context and context.get("service")):
+        ctx["no_pack_signal"] = True
+        # For unknown tools, also raise min_score so the matcher requires
+        # more confident matches. This is what makes the "noise error
+        # string" test defer cleanly: with min_score=1.25, the trigger
+        # token "error" hits every tool_policy row, but with min_score=4.0
+        # only rows that ALSO match a real token (e.g. "github", "render")
+        # get through. Since the unknown tool's tokens are noise, no row
+        # matches and the caller defers.
+        eff_min_score = max(min_score, 4.0)
+    else:
+        eff_min_score = min_score
     result = scenario_match_run(
         {
             "trigger": trigger,
             "pack": pack,
             "category": category,
-            "context": context or {"tool": tool_name, "error": error_text},
+            "context": ctx,
             "limit": limit,
-            "min_score": min_score,
+            "min_score": eff_min_score,
         }
     )
     deferred = bool(result.get("deferred"))
@@ -148,6 +164,10 @@ def _infer_pack(tool_name: str, error_text: str) -> str:
         return "firecrawl_steel"
     if any(k in t for k in ("composio", "connected_account", "tool router")):
         return "composio"
+    # v2.8.13: if we cannot infer a real pack from the tool name, fall
+    # back to "all" but mark `_no_pack_signal=True` via the context
+    # so the matcher can deprioritize aion_stack rows (which are
+    # operator-facing meta-policy and need a real tool name to fire).
     return "all"
 
 

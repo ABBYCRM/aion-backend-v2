@@ -128,6 +128,13 @@ def score_row(
     if query_has_error_hint and _SEVERITY_RANK.get(row.severity, 1) >= 2:
         score += cfg.severity_error_boost
 
+    # v2.8.13 — aion_stack rows are operator-facing meta-policy and need
+    # a real tool name to fire. When the chat-gate has NO pack signal
+    # (the tool name is unknown), deprioritize stack rows so unknown
+    # tools defer cleanly rather than match a generic tool_policy row.
+    if "no_pack_signal" in context_tokens and row.pack == "aion_stack":
+        score -= 5.0  # push below min_score=1.25
+
     return score
 
 

@@ -1044,6 +1044,94 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
             })
         except Exception as exc:
             audit.record("gdy.chat.evidence_failed", {"error": str(exc)[:200]})
+    # v2.8.13 — PyPI tier-1 source. The operator pointed at
+    # https://pypi.org/search/?q=image+gen&o= as the canonical
+    # trusted source for "dealing with code". When the user asks
+    # for a Python package, fire pypi.search first (broad) and
+    # pypi.lookup as fallback if the user named a specific
+    # package. Same evidence-wrapper pattern as the GDY gather.
+    if _is_pypi_intent(user_text):
+        try:
+            from .skills.runner import get_runner as _pypi_runner
+            import re as _p_re
+            _p_runner = _pypi_runner()
+            _p_q = user_text.strip()
+            for _p_prefix in (
+                "is there a python package for ", "is there a python package that ",
+                "find a python package for ", "find a python package that ",
+                "what python package for ", "what python package does ",
+                "what pip package for ", "look up ", "search pypi for ",
+                "search pypi ", "pypi search for ", "pypi ",
+            ):
+                if _p_q.lower().startswith(_p_prefix):
+                    _p_q = _p_q[len(_p_prefix):].rstrip("?").rstrip(".").strip()
+                    break
+            if not _p_q:
+                _p_q = user_text.strip()
+            # Pass 1: pypi.search (broad)
+            _p_search = await _p_runner.run("pypi.search", {"query": _p_q, "limit": 8}, subject="system:chat")
+            _p_search_data = _p_search.data if hasattr(_p_search, "data") else (_p_search.get("data") or {})
+            _p_search_hits = _p_search_data.get("hits") or []
+            # Pass 2: if the user named a specific package (single token or
+            # short string), also fetch the JSON metadata. This gives the
+            # model the canonical version + install command + classifiers.
+            _p_lookup_hits = []
+            if _p_q and len(_p_q.split()) <= 3 and re.match(r"^[A-Za-z0-9_.\-]+$", _p_q):
+                _p_lookup = await _p_runner.run("pypi.lookup", {"package": _p_q}, subject="system:chat")
+                _p_lookup_data = _p_lookup.data if hasattr(_p_lookup, "data") else (_p_lookup.get("data") or {})
+                if _p_lookup_data.get("ok"):
+                    _p_lookup_hits = [_p_lookup_data]
+            # Pass 3: PyPI's web search is fully client-side so the HTML
+            # scrape usually returns 0 hits. Fall back to our own
+            # web.search with `site:pypi.org` to give the model real
+            # canonical package URLs.
+            _p_web_hits = []
+            if not _p_search_hits and not _p_lookup_hits:
+                try:
+                    _p_web = await _p_runner.run("web.search", {"query": f"site:pypi.org {_p_q}", "limit": 8}, subject="system:chat")
+                    _p_web_data = _p_web.data if hasattr(_p_web, "data") else (_p_web.get("data") or {})
+                    _p_web_hits = _p_web_data.get("results") or []
+                except Exception as _pwe:
+                    audit.record("pypi.chat.web_fallback_failed", {"error": str(_pwe)[:200]})
+            _p_lines = []
+            if _p_search_hits:
+                _p_lines.append(f"=== PyPI search results ({_p_search_data.get('total', len(_p_search_hits))} hits) ===")
+                for h in _p_search_hits[:8]:
+                    _p_lines.append(
+                        f"- name={h.get('name','?')} version={h.get('version','')} install={h.get('install_command','')} summary={(h.get('summary') or '')[:100]}"
+                    )
+            if _p_lookup_hits:
+                _p_lines.append("=== PyPI package metadata ===")
+                for d in _p_lookup_hits:
+                    _p_lines.append(
+                        f"- name={d.get('package','?')} version={d.get('version','')} install={d.get('install_command','')} license={d.get('license','')[:40]} requires={d.get('requires_python','')} home={d.get('home_page','')[:60]}"
+                    )
+            if _p_web_hits:
+                _p_lines.append(f"=== web.search site:pypi.org fallback ({len(_p_web_hits)} hits) ===")
+                for w in _p_web_hits[:8]:
+                    _p_lines.append(
+                        f"- title={w.get('title','')[:80]} url={w.get('url','')[:80]}"
+                    )
+            if not _p_lines:
+                _p_lines.append("=== PyPI search returned 0 hits ===")
+                _p_lines.append(f"Search URL: {_p_search_data.get('search_url', 'https://pypi.org/search/?q=' + _p_q)}")
+            _wrapped_pypi = (
+                f"<tool_results source=\"pypi\" query=\"{_p_q[:60]}\">\n"
+                f"STATUS: SUCCESS — the items below are real PyPI hits (tier-1 trusted source).\n"
+                f"FORBIDDEN: inventing package names not in the list below.\n"
+                f"FORBIDDEN: claiming a package is 'not on PyPI' when the list above has hits.\n"
+                f"FORBIDDEN: recommending `pip install` for a package without using the canonical install_command from PyPI.\n"
+                "\n" + "\n".join(_p_lines) + "\n"
+                "</tool_results>"
+            )
+            tool_contexts.append(_wrapped_pypi)
+            tool_events.append({
+                "type": "tool", "tool": "pypi", "query": _p_q,
+                "search_hits": len(_p_search_hits),
+                "lookup_hits": len(_p_lookup_hits),
+            })
+        except Exception as exc:
+            audit.record("pypi.chat.evidence_failed", {"error": str(exc)[:200]})
     mission = MissionContext(user_input=user_text or "image attachment", history=[{"role": message.role, "content": message.text_content()} for message in body.messages[:-1]], metadata={"web_search": bool(search_query), "github": bool(repository), "tool_context_available": bool(tool_contexts), "tool_errors": tool_errors})
     # Build the dynamic skill index from the live registry. The static
     # block in kernel.py is always present, but the runtime list lets
@@ -1719,6 +1807,33 @@ def _is_gdy_intent(text: str) -> bool:
     gdy.meta_catalog_search as fallback, so the model has real evidence
     to cite instead of guessing or refusing."""
     return bool(_GDY_INTENT_RE.search(text or ""))
+
+
+# v2.8.13 — PyPI intent. The operator flagged
+# https://pypi.org/search/?q=image+gen&o= as the canonical tier-1
+# trusted source for "dealing with code". When the user is asking
+# for a Python package, look up the package on PyPI so the model
+# has the canonical name + version + install command + summary to
+# cite.
+_PYPI_INTENT_RE = re.compile(
+    r"(?ix)("
+    r"\bpypi\b|\bpip\s+install|\bpip\s+search|"
+    r"is\s+there\s+(?:a|an)\s+python\s+package|"
+    r"python\s+package\s+(?:for|to|that)|"
+    r"what\s+python\s+(?:lib|library|module|package|tool)|"
+    r"look\s+up\s+[a-z0-9_-]+\s+on\s+pypi|"
+    r"find\s+(?:a|an)\s+python\s+(?:lib|library|package)|"
+    r"package\s+for\s+image|gen\s+(?:images?|video|audio|text|code)|"
+    r"\bpip\b.*\b(?:install|package|search|registry)"
+    r")"
+)
+
+
+def _is_pypi_intent(text: str) -> bool:
+    """True when the user turn is asking PyPI for a Python package.
+    The chat handler routes these to pypi.search first (broad search)
+    and pypi.lookup as fallback (when the user named a specific package)."""
+    return bool(_PYPI_INTENT_RE.search(text or ""))
 
 
 # ----------------------------------------------------------------------------

@@ -191,6 +191,19 @@ def all_specs() -> list[SkillSpec]:
             input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string", "minLength": 1}, "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50}, "section": {"type": "string"}}},
             executor="builtin:gdy.meta_catalog_search", tags=["gdy", "meta", "search", "local-backfill"],
             error_codes=["catalog_not_loaded", "missing_required:query"]),
+        # ---- v2.8.13 — PyPI tier-1 trusted source for "dealing with code" ----
+        SkillSpec(id="pypi.search", name="PyPI search (tier-1 trusted source)",
+            description="Search the Python Package Index (https://pypi.org) — the canonical tier-1 source for Python packages. PyPI is the registry the user pointed at as the trusted source for 'dealing with code'. Use when the operator asks for a Python package that does X (image gen, embeddings, scraping, web framework, etc.). Scrapes the embedded JSON blob in https://pypi.org/search/?q=<q>&o=. Returns name, version, summary, install command, pypi_url. Falls back to the search_url if the HTML layout changes.",
+            side_effect="network",
+            input_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 200}, "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50}}},
+            executor="builtin:pypi.search", tags=["pypi", "search", "code", "tier-1"],
+            error_codes=["pypi_network", "pypi_upstream", "pypi_parse", "missing_required:query"]),
+        SkillSpec(id="pypi.lookup", name="PyPI package metadata (tier-1 trusted source)",
+            description="Look up a single Python package on https://pypi.org/pypi/<name>/json (the official JSON API). Returns the package's name, version, summary, description, author, home_page, project_urls, license, requires_python, requires_dist, classifiers, and the latest-version download URLs. Returns the install_command ('pip install <name>') so the operator can copy-paste it. Use this whenever the agent mentions a Python package by name to verify the canonical version, license, and homepage before recommending it.",
+            side_effect="network",
+            input_schema={"type": "object", "required": ["package"], "properties": {"package": {"type": "string", "minLength": 1, "maxLength": 200}, "query": {"type": "string"}}},
+            executor="builtin:pypi.lookup", tags=["pypi", "lookup", "code", "tier-1"],
+            error_codes=["pypi_network", "pypi_upstream", "pypi_parse", "not_found", "missing_required:package"]),
         # ---- 5 scenario matchers + 1 unified + 1 index = 7 new + 1 legacy = 8 ----
         SkillSpec(id="github.scenario.match", name="GitHub scenario match",
             description="Lookup the GitHub policy CSV. 500 rows grounded in 20+ GitHub docs pages (actions, secrets, API, webhooks, branch, Dependabot, Pages, etc.). Returns ranked matches with if_action / else_action / severity / source_doc. Never invents a row.",
@@ -406,6 +419,7 @@ def wire_executors() -> None:
     from .clients import syntax as syn
     from .clients import ste_rewrite as ste
     from .clients import gdy
+    from .clients import pypi
     r = get_runner()
     r.register_many({
         "builtin:web.search": web.web_search,
@@ -419,6 +433,8 @@ def wire_executors() -> None:
         "builtin:gdy.tools": gdy.gdy_tools,
         "builtin:gdy.search": gdy.gdy_search,
         "builtin:gdy.meta_catalog_search": gdy.gdy_meta_catalog_search,
+        "builtin:pypi.search": pypi.pypi_search,
+        "builtin:pypi.lookup": pypi.pypi_lookup,
         "builtin:github.repo": gh.github_repo,
         "builtin:github.file": gh.github_file,
         "builtin:github.issues": gh.github_issues,

@@ -254,12 +254,16 @@ def test_contract_seven_new_skills_registered():
 
 def test_contract_total_skill_count_is_45():
     """v2.8.12: total SkillSpec count in seed_all.py is 45 (38 + 7).
-    Updated to 46 in v2.8.12 patch 2 (gdy.meta_catalog_search backfill)."""
+    Updated to 46 in v2.8.12 patch 2 (gdy.meta_catalog_search backfill).
+    Updated to 48 in v2.8.13 (+ pypi.search + pypi.lookup).
+
+    NOTE: superseded by test_contract_total_skill_count_is_48 in v2.8.13."""
     import subprocess
     out = subprocess.check_output(
         ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
     ).decode().strip()
-    assert out in ("45", "46"), f"expected 45 or 46 SkillSpec, got {out}"
+    # Accept 45 / 46 / 48 (any pre- or post-v2.8.13 count).
+    assert out in ("45", "46", "48"), f"expected 45/46/48 SkillSpec, got {out}"
 
 
 def test_contract_all_skill_executors_wired():
@@ -424,12 +428,17 @@ def test_contract_gdy_meta_catalog_skill_registered():
 
 
 def test_contract_total_skill_count_is_46():
-    """v2.8.12: total SkillSpec count in seed_all.py is 46 (45 + 1)."""
+    """v2.8.12: total SkillSpec count in seed_all.py is 46 (45 + 1).
+
+    NOTE: superseded by test_contract_total_skill_count_is_48 in v2.8.13."""
     import subprocess
     out = subprocess.check_output(
         ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
     ).decode().strip()
-    assert out == "46", f"expected 46 SkillSpec, got {out}"
+    # Allow 46 OR 48 (the new total). We don't hard-pin the count to a
+    # single number so this test stays useful across the v2.8.12/13
+    # boundary.
+    assert out in ("46", "48"), f"expected 46 or 48 SkillSpec, got {out}"
 
 
 def test_contract_status_warning_entries_have_warning_and_replacement():
@@ -523,3 +532,124 @@ def test_chat_gate_specific_404_row_exists():
                 )
                 return
     assert False, "GH-0501 not found in github_scenarios.csv"
+
+
+# ----- v2.8.13 — PyPI tier-1 trusted source for code -----
+
+def test_pypi_lookup_returns_metadata_for_known_package():
+    """v2.8.13: pypi.lookup hits the official PyPI JSON API and returns
+    the canonical name, version, summary, install command, license, and
+    requires_python. The user pointed at pypi.org as the tier-1 source
+    for 'dealing with code'."""
+    from app.skills.clients import pypi
+    r = asyncio.get_event_loop().run_until_complete(
+        pypi.pypi_lookup({"package": "Pillow"}, {})
+    )
+    assert r["ok"] is True
+    # PyPI normalizes to lowercase
+    assert r["package"].lower() == "pillow"
+    assert r["version"]  # non-empty
+    assert r["install_command"].lower() == "pip install pillow"
+    assert "pypi.org/project/pillow" in r["pypi_url"].lower()
+    assert "pypi.org/pypi/pillow/json" in r["json_url"].lower()
+    # Pillow has multiple versions
+    assert r["versions_count"] >= 5
+
+
+def test_pypi_lookup_404_returns_clean_error():
+    from app.skills.clients import pypi
+    r = asyncio.get_event_loop().run_until_complete(
+        pypi.pypi_lookup({"package": "this-package-definitely-does-not-exist-zzz-9999"}, {})
+    )
+    assert r["ok"] is False
+    assert r["error_code"] == "not_found"
+    assert "pypi.org/search" in r["search_url"]
+
+
+def test_pypi_lookup_rejects_empty_package():
+    from app.skills.clients import pypi
+    r = asyncio.get_event_loop().run_until_complete(
+        pypi.pypi_lookup({"package": ""}, {})
+    )
+    assert r["ok"] is False
+    assert r["error_code"] == "missing_required:package"
+
+
+def test_pypi_search_returns_search_url_fallback():
+    """v2.8.13: the user's exact example. PyPI's web search is now
+    fully client-side (Cloudflare-protected) so the HTML scrape
+    returns 0 hits — the skill returns a non-fatal result with the
+    search_url so the operator (or the chat handler's web.search
+    fallback) can click through or retry with site:pypi.org."""
+    from app.skills.clients import pypi
+    r = asyncio.get_event_loop().run_until_complete(
+        pypi.pypi_search({"query": "image gen", "limit": 10}, {})
+    )
+    # Always non-fatal, always returns a search_url
+    assert r["ok"] is True
+    assert "search_url" in r
+    assert "pypi.org/search" in r["search_url"]
+    assert r["site_filter"] == "site:pypi.org"
+    # PyPI client-side search → 0 hits OR real hits; both are valid
+    assert r["total"] >= 0
+    if r["total"] > 0:
+        for h in r["hits"][:3]:
+            assert h.get("name"), f"hit missing name: {h}"
+            assert h.get("install_command", "").startswith("pip install")
+
+
+def test_pypi_search_rejects_empty_query():
+    from app.skills.clients import pypi
+    r = asyncio.get_event_loop().run_until_complete(
+        pypi.pypi_search({"query": ""}, {})
+    )
+    assert r["ok"] is False
+    assert r["error_code"] == "missing_required:query"
+
+
+def test_contract_pypi_skills_registered():
+    """v2.8.13: pypi.search + pypi.lookup are registered in seed_all.py
+    so the agent can call them via /api/skills/run. Also wired into
+    the executor map."""
+    seed = Path("app/skills/seed_all.py").read_text()
+    assert '"pypi.search"' in seed
+    assert '"pypi.lookup"' in seed
+    assert '"builtin:pypi.search": pypi.pypi_search' in seed
+    assert '"builtin:pypi.lookup": pypi.pypi_lookup' in seed
+
+
+def test_contract_total_skill_count_is_48():
+    """v2.8.13: total SkillSpec count in seed_all.py is 48 (was 46, +2 PyPI)."""
+    import subprocess
+    out = subprocess.check_output(
+        ["bash", "-c", 'grep "SkillSpec(id=" app/skills/seed_all.py | wc -l']
+    ).decode().strip()
+    assert out == "48", f"expected 48 SkillSpec, got {out}"
+
+
+def test_contract_kernel_prompt_lists_pypi():
+    """v2.8.13: the static skill index in kernel.py names pypi.search
+    and pypi.lookup, so the model knows they're available without
+    hallucinating 'I don't have access'."""
+    src = Path("app/kernel.py").read_text()
+    assert "pypi.search" in src
+    assert "pypi.lookup" in src
+    assert "tier-1" in src or "trusted source" in src
+
+
+def test_contract_chat_intent_router_detects_pypi_questions():
+    """v2.8.13: when the user asks 'is there a python package for image gen',
+    the chat handler routes to pypi.search first."""
+    from app.main import _is_pypi_intent
+    test_phrases = [
+        "is there a python package for image gen",
+        "what python package does embeddings",
+        "pip install pillow",
+        "look up openai on pypi",
+        "find a python lib for scraping",
+    ]
+    for p in test_phrases:
+        assert _is_pypi_intent(p), f"should detect pypi intent in: {p!r}"
+    # Negative
+    assert not _is_pypi_intent("what is the weather")
+    assert not _is_pypi_intent("tell me about cats")

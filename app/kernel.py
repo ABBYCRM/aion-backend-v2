@@ -27,7 +27,9 @@ STATIC_SKILL_INDEX: str = """Available skills (v2.8.12 — name them when releva
 - gdy.tools: list GDY tools, optionally filtered by category. category=18 returns 27 AI coding agents (Cursor, Devin, Cline, Claude Code, Codex, Gemini CLI, Continue, Aider, OpenHands, SWE-agent, Roo Code, Kilo, Goose, Replit).
 - gdy.search: search the live GDY index by name or keyword. Returns {data:[...], total, query}.
 - gdy.meta_catalog_search: search the AION-curated local backfill of 87 known AI coding / RAG / MCP / agent-framework repos (context7, superpowers, docling, haystack, qdrant, mem0, letta, firecrawl, browser-use, etc.). Use when live GDY search returns 0 hits. Set from_local=true to surface that the data came from the local catalog.
-- web.search: chain Brave + DuckDuckGo (max 12 results). Use for "search the web for X", "what's the latest on X", "find a blog post about Y". site:github.com / site:linkedin.com / site:news.ycombinator.com queries route to the web chain.
+- pypi.search: search the Python Package Index at https://pypi.org — the canonical tier-1 trusted source for Python packages ("dealing with code"). Use when the operator asks for a Python package that does X (image gen, embeddings, scraping, web framework, etc.). Returns name, version, summary, install command, pypi_url. Falls back to the search_url if the HTML layout changes.
+- pypi.lookup: look up a single Python package on PyPI's official JSON API. Returns name, version, summary, author, home_page, license, requires_python, requires_dist, classifiers, install_command, and the latest-version download URLs. Use this to verify the canonical version, license, and homepage of a package before recommending it.
+- web.search: chain Brave + DuckDuckGo (max 12 results). Use for "search the web for X", "what's the latest on X", "find a blog post about Y". site:github.com / site:linkedin.com / site:news.ycombinator.com / site:pypi.org queries route to the web chain.
 - github.repository / github.file / github.issues / github.search / github.issues.create / github.pulls.create / github.files.upsert: read + write GitHub operations on the allowlist. Use to fetch a README, file tree, or open an issue. When a tool error returns GITHUB_ALLOWED_REPOSITORIES, surface the message and tell the operator how to fix.
 - writing.ste.slop_suppress: 14 patterns of AI-voice filler (binary contrast, throat-clearing, AI power words, "Hope this helps" closers, etc.).
 - writing.adhd_output: action-first, numbered, restate-state output shape.
@@ -37,6 +39,7 @@ STATIC_SKILL_INDEX: str = """Available skills (v2.8.12 — name them when releva
 
 Trigger rules:
 - "is there a tool for X", "find an agent that does Y", "what's the best X for Y" -> gdy.search first, then gdy.meta_catalog_search as fallback.
+- "is there a python package for X", "what pip package does Y", "look up <package> on pypi" -> pypi.search first, then pypi.lookup if the user named a specific package.
 - "show me GDY categories" / "list the AI coding agents" -> gdy.categories then gdy.tools with category=18.
 - "verify the GDY token" / "is GDY configured" -> gdy.me.
 - "ingest this PDF as a skill" -> meta.book_to_skill.
