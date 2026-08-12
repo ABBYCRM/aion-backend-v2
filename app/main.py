@@ -78,6 +78,12 @@ class ChatRequest(BaseModel):
     github_path: str | None = Field(default=None, max_length=1000)
     github_query: str | None = Field(default=None, max_length=200)
     use_notes: bool = True
+    # ADHD-friendly reply shape: when the frontend knows we're in
+    # the middle of a multi-step task, it sends the current step and
+    # the total. The post-stream writing.adhd_output pass prepends
+    # "Step N of M." to the reply.
+    step: str | None = Field(default=None, max_length=40)
+    total_steps: int | None = Field(default=None, ge=1, le=100)
     @model_validator(mode="after")
     def pair(self):
         if bool(self.model) != bool(self.provider): raise ValueError("provider_and_model_are_required_together")
@@ -302,7 +308,7 @@ async def security_health(_: Principal = Depends(authenticated)):
     try:
         from .vault import KNOWN_KEYS as VAULT_KNOWN_KEYS, vault
         out["vault"] = {
-            "configured": vault is not None and bool(getattr(vault, "_master_key_enc", None)),
+            "configured": vault is not None and bool(getattr(vault, "_master_key", None)),
             "known_keys": len(VAULT_KNOWN_KEYS),
             "retention_lines": settings.audit_retention_lines,
         }
@@ -1275,14 +1281,16 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                 # the answer after the user-visible response has been
                 # delivered. Same contract as the local LLM path below.
                 _brain_mirror_buffer: list[str] = []
-                _brain_mirror_provider: str = ""
-                _brain_mirror_model: str = ""
+                # Default to the body.provider / body.model in case Brain
+                # never sends an `open` event (some Brain versions omit it).
+                _brain_mirror_provider: str = body.provider or ""
+                _brain_mirror_model: str = body.model or ""
                 async with limiter.chat_slot():
                     async for evt in brain_client.stream_chat(messages=brain_messages, temperature=body.temperature, max_tokens=body.max_tokens, model=body.model, provider=body.provider):
                         evt_type = evt.get("type")
                         if evt_type == "open":
-                            _brain_mirror_provider = evt.get("provider", "")
-                            _brain_mirror_model = evt.get("model", "")
+                            _brain_mirror_provider = evt.get("provider", "") or _brain_mirror_provider
+                            _brain_mirror_model = evt.get("model", "") or _brain_mirror_model
                         elif evt_type == "delta":
                             text_chunk = evt.get("text", "")
                             if text_chunk:
@@ -1392,7 +1400,12 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                         text_chunk = payload.get("text", "")
                         if text_chunk:
                             _mirror_buffer.append(text_chunk)
-                    yield _sse({"type": event_type, **payload}); await asyncio.sleep(0)
+                    # Strip any `type` key from payload before spreading so
+                    # the caller's `event_type` always wins. Otherwise a
+                    # provider that sets its own `type` in the payload
+                    # would silently overwrite ours.
+                    _safe_payload = {k: v for k, v in payload.items() if k != "type"}
+                    yield _sse({"type": event_type, **_safe_payload}); await asyncio.sleep(0)
             except AllProvidersFailed as exc:
                 yield _sse({"type": "error", "kind": "all_providers_failed", "message": str(exc)}); audit.record("chat.failed", {"subject": principal.subject, "request_id": mission.request_id, "error": str(exc)})
         # Answer mirror (opt-in via AION_REFLECTOR_ENABLED). Audits the just-
@@ -1481,9 +1494,9 @@ async def chat(body: ChatRequest, principal: Principal = Depends(authenticated))
                         if _slop.get("ok") else _full_answer
                     )
                     # Pass 2: ADHD output shape. Drop closers, prepend
-                    # state if multi-step context is set on the mission.
-                    _step = (principal.metadata or {}).get("step", "") if hasattr(principal, "metadata") else ""
-                    _total = (principal.metadata or {}).get("total_steps") if hasattr(principal, "metadata") else None
+                    # state if multi-step context is set on the request.
+                    _step = body.step or ""
+                    _total = body.total_steps
                     _args = {"text": _reslopped}
                     if _step:
                         _args["step"] = _step

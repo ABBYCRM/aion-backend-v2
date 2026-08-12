@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from pathlib import Path
@@ -354,7 +355,7 @@ def test_contract_gdy_meta_catalog_exists():
         # File may not have been created yet (operator asked mid-deploy)
         import pytest
         pytest.skip("data/gdy_meta_catalog.json not yet created")
-    catalog = __import__("json").load(p.open())
+    catalog = json.load(p.open())
     assert len(catalog) >= 30, f"meta-catalog has only {len(catalog)} repos"
     for entry in catalog[:5]:
         assert "repo" in entry
