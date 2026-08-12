@@ -7,3 +7,7 @@ finance_data_llm==0.1.13
 fluxflow-training==0.8.1
 instagram-posts-scraper==0.1.0
 evolvishub-text-classification-llm==1.1.0
+# v2.8.15 — isage-agentic pulls isage-intent which is pinned to py3.11 ONLY
+# (operator's gift is broken on 3.12). Heavy installer retries with
+# --ignore-requires-python + --no-deps as a fallback.
+isage-agentic==0.1.0.5
